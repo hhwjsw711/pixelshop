@@ -372,13 +372,18 @@ export const runPipeline = action({
           const rawUrl = data?.video?.url;
           if (!rawUrl) throw new Error("No video in fal response");
 
+          // Proxy through same origin: /api/media?url=...
+          // Avoids CORS issues with canvas frame grabs and ensures
+          // consistent buffering behavior across browsers.
+          const proxiedUrl = `/api/media?url=${encodeURIComponent(rawUrl)}`;
+
           // Ensure startAt is never in the past: if generation took longer
           // than expected, push the start time forward
           const actualStart = Math.max(scheduleStart, Date.now() + 2000);
 
           await ctx.runMutation(api.pipeline.addClipToSchedule, {
             itemId: args.itemId,
-            videoUrl: rawUrl,
+            videoUrl: proxiedUrl,
             dialogue: clip.dialogue,
             clipIndex: i,
             durationMs: CLIP_DURATION_MS,

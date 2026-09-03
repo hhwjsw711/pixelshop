@@ -274,10 +274,14 @@ function ChannelView({ data }: { data: ChannelData }) {
 
 // ─── Player Component ────────────────────────────────────
 //
-// Dual-video buffer with canvas transition:
-//   A plays current clip → B preloads next clip
-//   On switch: canvas captures A's last frame → B plays → fade in
-//   250ms clock in ChannelView drives entry changes
+// Single-video element with key-based switching + onEnded-driven advance.
+// Inspired by the unreel project's theater pattern:
+//   - Main video plays current clip, key changes on clip switch
+//   - Hidden preload video buffers next clip silently
+//   - onEnded drives clip advancement (not a polling clock)
+//   - Hold timer: if next clip not ready, replay current (loop beats freeze)
+
+const HOLD_MAX_MS = 4000;
 
 function Player({
   entry,
@@ -300,138 +304,83 @@ function Player({
   loaded: boolean;
   skewRef: React.RefObject<number>;
 }) {
-  const videoA = useRef<HTMLVideoElement>(null);
-  const videoB = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [activeVideo, setActiveVideo] = useState<0 | 1>(0);
-  const [showCanvas, setShowCanvas] = useState(false);
-  const [started, setStarted] = useState(false);
-  const entryId = entry?.id ?? null;
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const preloadRef = useRef<HTMLVideoElement>(null);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [needsTap, setNeedsTap] = useState(false);
 
-  // Track which video url each slot should have
-  const slotUrl = useRef<{ A: string | null; B: string | null }>({ A: null, B: null });
+  const entryKey = entry?.id ?? "standby";
+  const videoUrl = entry?.clip?.videoUrl;
+  const nextVideoUrl = nextEntry?.clip?.videoUrl;
 
-  // Preload next clip into the inactive video element whenever nextEntry changes
-  useEffect(() => {
-    if (!nextEntry?.clip?.videoUrl) return;
-    const inactiveEl = activeVideo === 0 ? videoB.current : videoA.current;
-    const inactiveSlot = activeVideo === 0 ? "B" : "A";
-    if (!inactiveEl) return;
-    const url = nextEntry.clip.videoUrl;
-    if (slotUrl.current[inactiveSlot] !== url) {
-      slotUrl.current[inactiveSlot] = url;
-      inactiveEl.src = url;
-      inactiveEl.load();
+  const clearHold = useCallback(() => {
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
     }
-  }, [nextEntry?.clip?.videoUrl, activeVideo]);
+  }, []);
 
-  // Handle entry switch: capture canvas frame, swap videos, play new
+  useEffect(() => clearHold, [clearHold]);
+
+  // Play current clip when entry changes (key swap triggers remount)
   useEffect(() => {
-    if (!entry || !entryId || !entry.clip?.videoUrl) return;
+    const video = videoRef.current;
+    if (!video || !videoUrl) return;
 
-    const newUrl = entry.clip.videoUrl;
-    const activeEl = activeVideo === 0 ? videoA.current : videoB.current;
-    const inactiveEl = activeVideo === 0 ? videoB.current : videoA.current;
-    const activeSlot = activeVideo === 0 ? "A" : "B";
-    const inactiveSlot = activeVideo === 0 ? "B" : "A";
-
-    if (!activeEl || !inactiveEl) return;
-
-    // If the active video already has this URL (e.g. first load), just play
-    // Otherwise we need to swap to the inactive one (which should have preloaded)
-    let targetEl: HTMLVideoElement;
-    let targetSlot: "A" | "B";
-    let needSwap: boolean;
-
-    if (slotUrl.current[activeSlot] === newUrl) {
-      // Active video already has the right URL — just play it
-      targetEl = activeEl;
-      targetSlot = activeSlot;
-      needSwap = false;
-    } else if (slotUrl.current[inactiveSlot] === newUrl) {
-      // Inactive video has preloaded the right URL — swap to it
-      targetEl = inactiveEl;
-      targetSlot = inactiveSlot;
-      needSwap = true;
-    } else {
-      // Neither has it — load into inactive and swap
-      slotUrl.current[inactiveSlot] = newUrl;
-      inactiveEl.src = newUrl;
-      inactiveEl.load();
-      targetEl = inactiveEl;
-      targetSlot = inactiveSlot;
-      needSwap = true;
+    // Try autoplay with current mute state
+    let cancelled = false;
+    const attempt = video.play();
+    if (attempt) {
+      attempt.catch(() => {
+        if (cancelled) return;
+        // Browser blocked autoplay with sound — fall back to muted
+        video.muted = true;
+        setNeedsTap(true);
+        video.play().catch(() => {});
+      });
     }
 
-    const playNew = () => {
-      // Capture last frame from the old active video to canvas (if it was playing)
-      if (needSwap && activeEl.readyState >= 2 && canvasRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          canvas.width = activeEl.videoWidth || 1280;
-          canvas.height = activeEl.videoHeight || 720;
-          try {
-            ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
-            setShowCanvas(true);
-          } catch {}
-        }
-      }
+    return () => { cancelled = true; };
+  }, [entryKey]); // eslint-disable-line
 
-      // Align currentTime to server clock
-      const offset = (Date.now() + skewRef.current - entry.startAt) / 1000;
-      if (offset > 0.3 && targetEl.duration && offset < targetEl.duration - 0.3) {
-        targetEl.currentTime = offset;
-      }
-
-      targetEl.muted = muted;
-      targetEl.play().catch(() => {});
-
-      if (needSwap) {
-        // Swap active
-        setActiveVideo(targetSlot === "A" ? 0 : 1);
-        // Hide canvas after new video starts rendering
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            setShowCanvas(false);
-          });
-        });
-      }
-    };
-
-    if (targetEl.readyState >= 3) {
-      // Already buffered — play immediately
-      playNew();
-    } else {
-      // Wait for canplay
-      targetEl.muted = true; // start muted to allow autoplay
-      const handler = () => {
-        targetEl.removeEventListener("canplay", handler);
-        playNew();
-      };
-      targetEl.addEventListener("canplay", handler);
-      // If the URL was just set, load() was already called above
-      if (targetEl.src !== newUrl) {
-        targetEl.src = newUrl;
-        targetEl.load();
-      }
-      // Safety timeout: if canplay doesn't fire in 3s, play anyway
-      setTimeout(() => {
-        targetEl.removeEventListener("canplay", handler);
-        if (slotUrl.current[targetSlot] === newUrl) {
-          playNew();
-        }
-      }, 3000);
-    }
-
-    setStarted(true);
-  }, [entryId]); // eslint-disable-line
-
-  // Update mute on active video
+  // Keep mute state in sync
   useEffect(() => {
-    const active = activeVideo === 0 ? videoA.current : videoB.current;
-    if (active) active.muted = muted;
-  }, [muted, activeVideo]);
+    const video = videoRef.current;
+    if (video) video.muted = muted;
+  }, [muted]);
+
+  // Preload next clip into hidden video element
+  useEffect(() => {
+    const preload = preloadRef.current;
+    if (!preload || !nextVideoUrl) return;
+    preload.src = nextVideoUrl;
+    preload.load();
+  }, [nextVideoUrl]);
+
+  // onEnded: hold last frame briefly, then advance to next clip
+  // The 250ms clock in ChannelView will pick up the next schedule entry
+  const onEnded = useCallback(() => {
+    clearHold();
+    const video = videoRef.current;
+    if (!video) return;
+
+    // If next entry exists and has a video, the ChannelView clock will
+    // switch to it within 250ms. If not, replay current clip to avoid freeze.
+    if (!nextEntry?.clip?.videoUrl) {
+      holdTimer.current = setTimeout(() => {
+        holdTimer.current = null;
+        video.currentTime = 0;
+        video.play().catch(() => {});
+      }, HOLD_MAX_MS);
+    }
+  }, [nextEntry?.clip?.videoUrl, clearHold]);
+
+  const toggleSound = () => {
+    onToggleMute();
+    setNeedsTap(false);
+    const video = videoRef.current;
+    if (video && video.paused) video.play().catch(() => {});
+  };
 
   const hasVideo = entry?.clip?.videoUrl;
 
@@ -448,29 +397,31 @@ function Player({
             />
           )}
 
-          {/* Canvas transition frame (shown briefly during video swap) */}
-          <canvas
-            ref={canvasRef}
-            className={`absolute inset-0 h-full w-full object-contain z-20 transition-opacity duration-100 ${
-              showCanvas ? "opacity-100" : "opacity-0 pointer-events-none"
-            }`}
+          {/* Main video — key remounts on clip change */}
+          <video
+            key={entryKey}
+            ref={videoRef}
+            src={videoUrl}
+            autoPlay
+            playsInline
+            muted={muted}
+            preload="auto"
+            onEnded={onEnded}
+            className="absolute inset-0 h-full w-full object-contain z-10"
           />
 
-          {/* Dual video elements */}
-          {[0, 1].map((i) => (
+          {/* Hidden preload video for next clip */}
+          {nextVideoUrl && (
             <video
-              key={i}
-              ref={i === 0 ? videoA : videoB}
-              playsInline
+              ref={preloadRef}
+              className="hidden"
               preload="auto"
-              muted={i !== activeVideo || muted}
-              className={`absolute inset-0 h-full w-full object-contain transition-opacity duration-100 ${
-                i === activeVideo && !showCanvas ? "z-10 opacity-100" : "z-0 opacity-0 pointer-events-none"
-              }`}
+              muted
+              playsInline
             />
-          ))}
+          )}
 
-          {/* Live badge + countdown */}
+          {/* Live badge */}
           <div className="absolute left-4 top-4 z-20 flex items-center gap-2 font-mono text-[11px] tracking-widest">
             {(!entry.item?.generationDone ||
               (Date.now() + skewRef.current - (entry.item?.newestClipAt ?? 0) < 300000)) && (
@@ -483,16 +434,16 @@ function Player({
           {/* Mute toggle */}
           <div className="absolute right-4 top-4 z-20 flex gap-2">
             <button
-              onClick={onToggleMute}
+              onClick={toggleSound}
               className="rounded-lg bg-black/60 px-3 py-1.5 font-mono text-xs text-white backdrop-blur hover:bg-black/80"
             >
               {muted ? "🔇 UNMUTE" : "🔊 MUTE"}
             </button>
           </div>
 
-          {/* Subtitles */}
+          {/* Subtitles — bound to clip, not independent timer */}
           {entry.clip?.dialogue && (
-            <Subtitles dialogue={entry.clip.dialogue} startAt={entry.startAt} duration={entry.duration} skewRef={skewRef} />
+            <Subtitles dialogue={entry.clip.dialogue} />
           )}
 
           {/* Question badge */}
@@ -557,37 +508,15 @@ function Player({
 }
 
 // ─── Subtitles ───────────────────────────────────────────
+// Bound to the current clip: shows the full dialogue line while the
+// clip plays, no independent timer. Subtitle changes only when the
+// clip changes (via key remount), so it never drifts from the audio.
 
-function Subtitles({
-  dialogue,
-  startAt,
-  duration,
-  skewRef,
-}: {
-  dialogue: string;
-  startAt: number;
-  duration: number;
-  skewRef: React.RefObject<number>;
-}) {
-  const words = dialogue.split(/\s+/);
-  const halves = words.length <= 14
-    ? [dialogue]
-    : [words.slice(0, Math.ceil(words.length / 2)).join(" "), words.slice(Math.ceil(words.length / 2)).join(" ")];
-
-  const [half, setHalf] = useState(0);
-  useEffect(() => {
-    if (halves.length < 2) return;
-    const interval = setInterval(() => {
-      const elapsed = Date.now() + skewRef.current - startAt;
-      setHalf(elapsed > (duration * 1000) / 2 ? 1 : 0);
-    }, 300);
-    return () => clearInterval(interval);
-  }, [halves.length, startAt, duration, skewRef]);
-
+function Subtitles({ dialogue }: { dialogue: string }) {
   return (
     <div className="pointer-events-none absolute inset-x-2 bottom-[3.4rem] z-20 flex justify-center sm:inset-x-4 sm:bottom-28">
       <p className="max-w-2xl rounded bg-black/75 px-2 py-1 text-center font-mono text-[10px] leading-snug text-white sm:px-3 sm:py-1.5 sm:text-sm">
-        {halves[Math.min(half, halves.length - 1)]}
+        {dialogue}
       </p>
     </div>
   );
