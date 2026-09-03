@@ -1,16 +1,17 @@
-﻿import { defineSchema, defineTable } from "convex/server";
+import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-// 鈹€鈹€鈹€ Schema 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-// 5 tables per the design doc:
-//   channels  鈥?single channel for MVP
-//   items     鈥?products submitted by users
-//   clips     鈥?generated video segments
-//   schedule  鈥?time-ordered playback entries
-//   chat      鈥?live chat messages
+// ========================================================================
+// Schema — 5 tables per the design doc:
+//   channels  — single channel for MVP
+//   items     — products submitted by users
+//   clips     — generated video segments
+//   schedule  — time-ordered playback entries
+//   chat      — live chat messages
+// ========================================================================
 
 export default defineSchema({
-  // 鈹€鈹€ Channel 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // ---- Channel ----
   channels: defineTable({
     slug: v.string(),
     name: v.string(),
@@ -25,7 +26,7 @@ export default defineSchema({
     pending: v.array(v.id("items")),   // generating items
   }).index("by_slug", ["slug"]),
 
-  // 鈹€鈹€ Items (products) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // ---- Items (products) ----
   items: defineTable({
     channelId: v.id("channels"),
     url: v.string(),
@@ -48,7 +49,7 @@ export default defineSchema({
   }).index("by_channel", ["channelId"])
     .index("by_status", ["channelId", "status"]),
 
-  // 鈹€鈹€ Clips (generated video segments) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // ---- Clips (generated video segments) ----
   clips: defineTable({
     channelId: v.id("channels"),
     itemId: v.id("items"),
@@ -73,7 +74,7 @@ export default defineSchema({
   }).index("by_item", ["itemId"])
     .index("by_channel_status", ["channelId", "status"]),
 
-  // 鈹€鈹€ Schedule (playback time-axis) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // ---- Schedule (playback time-axis) ----
   schedule: defineTable({
     channelId: v.id("channels"),
     itemId: v.id("items"),
@@ -82,7 +83,7 @@ export default defineSchema({
     durationMs: v.number(),
   }).index("by_channel_start", ["channelId", "startAt"]),
 
-  // 鈹€鈹€ Chat 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // ---- Chat ----
   chat: defineTable({
     channelId: v.id("channels"),
     sender: v.string(),

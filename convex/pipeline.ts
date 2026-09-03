@@ -64,6 +64,17 @@ export const addClipToSchedule = mutation({
     const item = await ctx.db.get(args.itemId);
     if (!item) throw new Error("Item not found");
 
+    // --- S3 fix: re-read latest schedule end inside the mutation ---
+    // Convex mutations are serialized, so this read is always fresh.
+    // The action's getLastScheduleEnd query may be stale (action stale-read).
+    const lastEntry = await ctx.db
+      .query("schedule")
+      .withIndex("by_channel_start", (q) => q.eq("channelId", item.channelId))
+      .order("desc")
+      .first();
+    const realLastEnd = lastEntry ? lastEntry.startAt + lastEntry.durationMs : 0;
+    const actualStart = Math.max(args.startAt, realLastEnd + 1000, Date.now() + 1000);
+
     const clipId = await ctx.db.insert("clips", {
       channelId: item.channelId,
       itemId: args.itemId,
@@ -80,7 +91,7 @@ export const addClipToSchedule = mutation({
       channelId: item.channelId,
       itemId: args.itemId,
       clipId,
-      startAt: args.startAt,
+      startAt: actualStart,
       durationMs: args.durationMs,
     });
 
@@ -181,9 +192,27 @@ const FALLBACK_CLIPS: ScriptClip[] = [
 
 // ─── Helper: scrape product page ────────────────────────────
 
+// --- SSRF protection for scrapeProduct ---
+
+const BLOCKED_HOST_RE =
+  /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|0\.|::1|fe80:|localhost)/i;
+
+function isSafeUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (!["http:", "https:"].includes(u.protocol)) return false;
+    if (BLOCKED_HOST_RE.test(u.hostname.toLowerCase())) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function scrapeProduct(
   url: string,
 ): Promise<{ title?: string; price?: string; image?: string }> {
+  // SSRF: reject non-http(s) and private network URLs
+  if (!isSafeUrl(url)) return {};
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -356,45 +385,56 @@ export const runPipeline = action({
       let successCount = 0;
       for (let i = 0; i < clips.length; i++) {
         const clip = clips[i];
-        try {
-          const result = await fal.subscribe(TURBO_T2V, {
-            input: {
-              prompt: clip.videoPrompt,
-              duration: CLIP_DURATION,
-              resolution: "768P",
-              aspect_ratio: "16:9",
-              prompt_expansion_mode: "balanced",
-            },
-            pollInterval: 500,
-          });
+        let clipSuccess = false;
 
-          const data = result.data as { video?: { url?: string } };
-          const rawUrl = data?.video?.url;
-          if (!rawUrl) throw new Error("No video in fal response");
+        // H4: retry each clip up to 2 times with 500ms backoff
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const result = await fal.subscribe(TURBO_T2V, {
+              input: {
+                prompt: clip.videoPrompt,
+                duration: CLIP_DURATION,
+                resolution: "768P",
+                aspect_ratio: "16:9",
+                prompt_expansion_mode: "balanced",
+              },
+              pollInterval: 1000,
+            });
 
-          // Proxy through same origin: /api/media?url=...
-          // Avoids CORS issues with canvas frame grabs and ensures
-          // consistent buffering behavior across browsers.
-          const proxiedUrl = `/api/media?url=${encodeURIComponent(rawUrl)}`;
+            const data = result.data as { video?: { url?: string } };
+            const rawUrl = data?.video?.url;
+            if (!rawUrl) throw new Error("No video in fal response");
 
-          // Ensure startAt is never in the past: if generation took longer
-          // than expected, push the start time forward
-          const actualStart = Math.max(scheduleStart, Date.now() + 2000);
+            // Proxy through same origin: /api/media?url=...
+            const proxiedUrl = `/api/media?url=${encodeURIComponent(rawUrl)}`;
 
-          await ctx.runMutation(api.pipeline.addClipToSchedule, {
-            itemId: args.itemId,
-            videoUrl: proxiedUrl,
-            dialogue: clip.dialogue,
-            clipIndex: i,
-            durationMs: CLIP_DURATION_MS,
-            startAt: actualStart,
-          });
+            // startAt is passed as a hint; the mutation will re-read the
+            // actual last schedule end to prevent stale-read overlaps.
+            const hintStart = Math.max(scheduleStart, Date.now() + 2000);
 
-          scheduleStart = actualStart + CLIP_DURATION_MS;
-          successCount++;
-        } catch (e) {
-          console.error(`Clip ${i} generation failed:`, e);
-          // Continue with next clip
+            await ctx.runMutation(api.pipeline.addClipToSchedule, {
+              itemId: args.itemId,
+              videoUrl: proxiedUrl,
+              dialogue: clip.dialogue,
+              clipIndex: i,
+              durationMs: CLIP_DURATION_MS,
+              startAt: hintStart,
+            });
+
+            scheduleStart = hintStart + CLIP_DURATION_MS;
+            successCount++;
+            clipSuccess = true;
+            break; // success, no more retries
+          } catch (e) {
+            console.error(`Clip ${i} attempt ${attempt + 1} failed:`, e);
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 500));
+            }
+          }
+        }
+
+        if (!clipSuccess) {
+          console.error(`Clip ${i} failed after 2 attempts, skipping`);
         }
       }
 

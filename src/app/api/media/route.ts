@@ -31,10 +31,20 @@ export async function GET(req: NextRequest) {
   if (!isAllowed(url)) return new Response("host not allowed", { status: 403 });
 
   const range = req.headers.get("range");
-  const upstream = await fetch(url, {
-    headers: range ? { range } : undefined,
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, {
+      headers: range ? { range } : undefined,
+      cache: "force-cache",
+      signal: controller.signal,
+    });
+  } catch {
+    clearTimeout(timeout);
+    return new Response("upstream timeout", { status: 502 });
+  }
+  clearTimeout(timeout);
 
   const headers = new Headers();
   for (const name of PASSTHROUGH_HEADERS) {

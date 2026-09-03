@@ -74,7 +74,6 @@ export const getChannel = query({
             duration: clip.durationMs / 1000,
             dialogue: clip.dialogue,
             source: clip.source,
-            question: clip.questionId ? undefined : undefined,
             askedBy: clip.askedBy,
           } : null,
         };
@@ -150,6 +149,23 @@ export const getChannel = query({
 
 // ─── Submit product ───────────────────────────────────────
 
+// --- URL validation (SSRF protection) ---
+
+const BLOCKED_HOST_PATTERNS =
+  /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|0\.|::1|fe80:|localhost)/i;
+
+function validateProductUrl(raw: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) return null;
+  if (BLOCKED_HOST_PATTERNS.test(parsed.hostname.toLowerCase())) return null;
+  return parsed.href;
+}
+
 export const submitProduct = mutation({
   args: {
     url: v.string(),
@@ -158,6 +174,36 @@ export const submitProduct = mutation({
     image: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // --- SSRF: validate URL on the backend ---
+    const validatedUrl = validateProductUrl(args.url);
+    if (!validatedUrl) throw new Error("Invalid product URL");
+
+    // --- Rate limit: max 5 queued/working items in the last 10 minutes ---
+    const tenMinAgo = Date.now() - 600_000;
+    const ch = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+    if (ch) {
+      const recentQueued = await ctx.db
+        .query("items")
+        .withIndex("by_status", (q) =>
+          q.eq("channelId", ch._id).eq("status", "queued"),
+        )
+        .filter((q) => q.gt(q.field("_creationTime"), tenMinAgo))
+        .take(10);
+      const recentWorking = await ctx.db
+        .query("items")
+        .withIndex("by_status", (q) =>
+          q.eq("channelId", ch._id).eq("status", "working"),
+        )
+        .filter((q) => q.gt(q.field("_creationTime"), tenMinAgo))
+        .take(10);
+      if (recentQueued.length + recentWorking.length >= 5) {
+        throw new Error("Too many submissions. Please wait a few minutes.");
+      }
+    }
+
     // Ensure channel exists
     let channel = await ctx.db
       .query("channels")
@@ -177,18 +223,23 @@ export const submitProduct = mutation({
       channel = await ctx.db.get(channelId);
     }
 
-    const channelId = channel!._id;
+    if (!channel) throw new Error("Failed to create channel");
+    const channelId = channel._id;
 
-    // Generate item number: PX-<count>
-    const existingItems = await ctx.db
+    // Generate item number: PX-<max+1> (avoids collision after deletion)
+    const allItems = await ctx.db
       .query("items")
       .withIndex("by_channel", (q) => q.eq("channelId", channelId))
       .collect();
-    const itemNumber = `PX-${1000 + existingItems.length + 1}`;
+    const maxNum = allItems.reduce((max, it) => {
+      const n = parseInt(it.itemNumber.replace("PX-", ""), 10);
+      return isNaN(n) ? max : Math.max(max, n);
+    }, 1000);
+    const itemNumber = `PX-${maxNum + 1}`;
 
     const itemId = await ctx.db.insert("items", {
       channelId,
-      url: args.url,
+      url: validatedUrl,
       title: args.title ?? "Processing…",
       price: args.price,
       image: args.image,
@@ -200,8 +251,8 @@ export const submitProduct = mutation({
 
     // Add to channel pending list
     await ctx.db.patch(channelId, {
-      pending: [...channel!.pending, itemId],
-      status: channel!.status === "offline" ? "offline" : "live",
+      pending: [...channel.pending, itemId],
+      status: channel.status === "offline" ? "offline" : "live",
     });
 
     return { itemId, itemNumber };
@@ -332,8 +383,12 @@ export const seedMockData = mutation({
 });
 
 export const clearMockData = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { adminKey: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    // --- Require admin key to prevent unauthorized data wipe ---
+    if (args.adminKey !== process.env.ADMIN_SECRET) {
+      throw new Error("Unauthorized: admin key required");
+    }
     const channel = await ctx.db
       .query("channels")
       .withIndex("by_slug", (q) => q.eq("slug", "main"))
@@ -470,3 +525,39 @@ export const rotateSchedule = internalMutation({
     return { rotated: true, added };
   },
 });
+
+// --- Recover stuck items (cron-triggered every 5 min) ---
+// Marks items stuck in "working" for >5 min as failed so the UI shows an error
+// instead of spinning forever.
+
+export const recoverStuckItems = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const fiveMinAgo = Date.now() - 300_000;
+    const channel = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+    if (!channel) return { recovered: 0 };
+    const stuck = await ctx.db
+      .query("items")
+      .withIndex("by_status", (q) => q.eq("channelId", channel._id).eq("status", "working"))
+      .filter((q) => q.lt(q.field("_creationTime"), fiveMinAgo))
+      .collect();
+    for (const item of stuck) {
+      await ctx.db.patch(item._id, {
+        status: "failed",
+        error: "Generation timed out",
+      });
+      // Remove from pending
+      const channel = await ctx.db.get(item.channelId);
+      if (channel) {
+        await ctx.db.patch(item.channelId, {
+          pending: channel.pending.filter((id) => id !== item._id),
+        });
+      }
+    }
+    return { recovered: stuck.length };
+  },
+});
+

@@ -88,27 +88,12 @@ function findNext(schedule: ScheduleEntry[], now: number) {
   return null;
 }
 
-// ─── Standby messages ────────────────────────────────────
-
-const STANDBY_MSGS = [
-  "warming up the studio lights…",
-  "polishing the display pedestal…",
-  "rolling the teleprompter…",
-  "adjusting the shoulder pads…",
-  "cueing the phone lines…",
-  "rehearsing the big reveal…",
-  "testing the applause sign…",
-  "brewing coffee for the crew…",
-];
+// --- Helper: hash string for color assignment ---
 
 function hashStr(s: string) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
   return Math.abs(h);
-}
-
-function standbyMsg(id: string, t: number) {
-  return STANDBY_MSGS[(hashStr(id) + Math.floor(t / 6000)) % STANDBY_MSGS.length];
 }
 
 // ─── Color for chat usernames ────────────────────────────
@@ -147,15 +132,12 @@ function ChannelView({ data }: { data: ChannelData }) {
   const [muted, setMuted] = useState(true);
   const [selectedItem, setSelectedItem] = useState<RotationItem | null>(null);
   const [showSubmit, setShowSubmit] = useState(false);
-
-  // Mock data controls (P1 testing)
-  const seedMock = useMutation(api.channel.seedMockData);
-  const clearMock = useMutation(api.channel.clearMockData);
+  const [clipIndex, setClipIndex] = useState<number>(-1);
 
   const skewRef = useRef(0);
   const [now, setNow] = useState(0);
 
-  // Update clock
+  // Update clock (for UI display only — not for clip switching)
   useEffect(() => {
     if (data.serverNow) {
       skewRef.current = data.serverNow - Date.now();
@@ -166,9 +148,28 @@ function ChannelView({ data }: { data: ChannelData }) {
     return () => clearInterval(interval);
   }, [data.serverNow]);
 
-  const position = findPosition(data.schedule, now);
-  const currentEntry = position?.entry ?? null;
-  const nextEntry = findNext(data.schedule, now);
+  // Initialize clipIndex on first load using server time
+  useEffect(() => {
+    if (clipIndex < 0 && data.schedule.length > 0 && data.serverNow) {
+      const pos = findPosition(data.schedule, Date.now() + skewRef.current);
+      setClipIndex(pos?.index ?? 0);
+    }
+  }, [data.schedule, data.serverNow, clipIndex, skewRef]);
+
+  const currentEntry = clipIndex >= 0 && clipIndex < data.schedule.length
+    ? data.schedule[clipIndex]
+    : null;
+  const nextEntry = clipIndex >= 0 && clipIndex + 1 < data.schedule.length
+    ? data.schedule[clipIndex + 1]
+    : null;
+
+  const advanceClip = useCallback(() => {
+    setClipIndex((prev) => {
+      if (prev + 1 < data.schedule.length) return prev + 1;
+      return prev; // stay at end, hold timer will replay
+    });
+  }, [data.schedule.length]);
+
   const rotation = data.rotation ?? [];
   const pending = data.pending ?? [];
 
@@ -189,23 +190,6 @@ function ChannelView({ data }: { data: ChannelData }) {
           >
             + SELL
           </button>
-          {/* Mock data controls (P1 testing — remove in production) */}
-          {data.schedule.length === 0 && (
-            <button
-              onClick={() => seedMock({})}
-              className="font-bold rounded-md bg-cyan/80 px-3 py-1.5 text-[11px] tracking-wide text-black hover:brightness-110"
-            >
-              SEED DEMO
-            </button>
-          )}
-          {data.schedule.length > 0 && (
-            <button
-              onClick={() => clearMock({})}
-              className="font-bold rounded-md bg-white/10 px-3 py-1.5 text-[11px] tracking-wide text-zinc-400 hover:bg-white/20"
-            >
-              CLEAR
-            </button>
-          )}
           {currentEntry && (
             <span className="flex items-center gap-2 rounded-md bg-pink px-3 py-1.5 text-white font-bold">
               <span className="h-2 w-2 rounded-full bg-white animate-blink" />
@@ -224,6 +208,7 @@ function ChannelView({ data }: { data: ChannelData }) {
             nextEntry={nextEntry}
             muted={muted}
             onToggleMute={() => setMuted((m) => !m)}
+            onAdvance={advanceClip}
             pendingCount={pending.length}
             hasCurrent={data.schedule.length > 0}
             offline={data.offline}
@@ -288,6 +273,7 @@ function Player({
   nextEntry,
   muted,
   onToggleMute,
+  onAdvance,
   pendingCount,
   hasCurrent,
   offline,
@@ -298,6 +284,7 @@ function Player({
   nextEntry: ScheduleEntry | null;
   muted: boolean;
   onToggleMute: () => void;
+  onAdvance: () => void;
   pendingCount: number;
   hasCurrent: boolean;
   offline: boolean;
@@ -307,7 +294,6 @@ function Player({
   const videoRef = useRef<HTMLVideoElement>(null);
   const preloadRef = useRef<HTMLVideoElement>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [needsTap, setNeedsTap] = useState(false);
 
   const entryKey = entry?.id ?? "standby";
   const videoUrl = entry?.clip?.videoUrl;
@@ -327,15 +313,12 @@ function Player({
     const video = videoRef.current;
     if (!video || !videoUrl) return;
 
-    // Try autoplay with current mute state
     let cancelled = false;
     const attempt = video.play();
     if (attempt) {
       attempt.catch(() => {
         if (cancelled) return;
-        // Browser blocked autoplay with sound — fall back to muted
         video.muted = true;
-        setNeedsTap(true);
         video.play().catch(() => {});
       });
     }
@@ -357,27 +340,27 @@ function Player({
     preload.load();
   }, [nextVideoUrl]);
 
-  // onEnded: hold last frame briefly, then advance to next clip
-  // The 250ms clock in ChannelView will pick up the next schedule entry
+  // onEnded: advance to next clip via onAdvance, or replay current if none
   const onEnded = useCallback(() => {
     clearHold();
     const video = videoRef.current;
     if (!video) return;
 
-    // If next entry exists and has a video, the ChannelView clock will
-    // switch to it within 250ms. If not, replay current clip to avoid freeze.
-    if (!nextEntry?.clip?.videoUrl) {
+    if (nextEntry?.clip?.videoUrl) {
+      // Advance — parent increments clipIndex → key change → remount
+      onAdvance();
+    } else {
+      // No next clip — replay current after brief hold
       holdTimer.current = setTimeout(() => {
         holdTimer.current = null;
         video.currentTime = 0;
         video.play().catch(() => {});
       }, HOLD_MAX_MS);
     }
-  }, [nextEntry?.clip?.videoUrl, clearHold]);
+  }, [nextEntry?.clip?.videoUrl, clearHold, onAdvance]);
 
   const toggleSound = () => {
     onToggleMute();
-    setNeedsTap(false);
     const video = videoRef.current;
     if (video && video.paused) video.play().catch(() => {});
   };

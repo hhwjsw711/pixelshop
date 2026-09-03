@@ -10,4 +10,11 @@ crons.interval(
   internal.channel.rotateSchedule,
 );
 
+// Every 5 minutes, recover items stuck in "working" state
+crons.interval(
+  "recoverStuckItems",
+  { minutes: 5 },
+  internal.channel.recoverStuckItems,
+);
+
 export default crons;
