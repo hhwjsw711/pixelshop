@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'e001bf3c-e3a7-4bf1-b2cb-25e4c466f5fe'
-  PropagateID: 'e001bf3c-e3a7-4bf1-b2cb-25e4c466f5fe'
-  ReservedCode1: '265b8c33-d27d-414f-a77c-e1e8d6f40b39'
-  ReservedCode2: '265b8c33-d27d-414f-a77c-e1e8d6f40b39'
+  ProduceID: 'c9c8dda7-4778-4e18-a8bf-1a229b3fcf01'
+  PropagateID: 'c9c8dda7-4778-4e18-a8bf-1a229b3fcf01'
+  ReservedCode1: 'dd109e15-7c01-4560-8178-464389dbfe13'
+  ReservedCode2: 'dd109e15-7c01-4560-8178-464389dbfe13'
 ---
 
 # Hackathon log
@@ -23,7 +23,7 @@ AIGC:
 - **Auth:** none
 - **AI models:** none yet
 - **Started:** 2026-09-03T22:12:32Z
-- **Last updated:** 2026-09-03T22:35:00Z
+- **Last updated:** 2026-09-03T22:46:00Z
 
 ## Log
 
@@ -51,5 +51,18 @@ Next.js build succeeds. GitHub repo created (private) and code pushed.
 P0 acceptance test: submitted a test product via `convex run channel:submitProduct`
 — item PX-1001 created with correct title/price/image, channel shows it in pending
 list, status queued. All data verified via getItem and getChannel queries.
+
+> AI生成
+
+### 2026-09-03 - P1 playback core complete
+P1 milestone reached. Dual-video buffer player rewritten with canvas transition
+frames: video A plays current clip while video B preloads next; on switch, canvas
+captures last frame from old video, new video fades in over it. 250ms clock tick
+with serverNow skew alignment keeps schedule entries synced. Added seedMockData /
+clearMockData mutations for testing with 3 public sample MP4s (test-videos.co.uk).
+Verified in browser: BigBuckBunny 720p plays → seamless switch to Jellyfish 720p
+(no black screen, no transition artifact) → third clip (Bunny 360p) preloaded.
+Subtitles, LIVE badge, product info, BUY NOW all update correctly per clip.
+TypeScript typecheck passes. Next.js build succeeds. Deployed to Convex cloud.
 
 > AI生成

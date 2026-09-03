@@ -148,6 +148,10 @@ function ChannelView({ data }: { data: ChannelData }) {
   const [selectedItem, setSelectedItem] = useState<RotationItem | null>(null);
   const [showSubmit, setShowSubmit] = useState(false);
 
+  // Mock data controls (P1 testing)
+  const seedMock = useMutation(api.channel.seedMockData);
+  const clearMock = useMutation(api.channel.clearMockData);
+
   const skewRef = useRef(0);
   const [now, setNow] = useState(0);
 
@@ -185,6 +189,23 @@ function ChannelView({ data }: { data: ChannelData }) {
           >
             + SELL
           </button>
+          {/* Mock data controls (P1 testing — remove in production) */}
+          {data.schedule.length === 0 && (
+            <button
+              onClick={() => seedMock({})}
+              className="font-bold rounded-md bg-cyan/80 px-3 py-1.5 text-[11px] tracking-wide text-black hover:brightness-110"
+            >
+              SEED DEMO
+            </button>
+          )}
+          {data.schedule.length > 0 && (
+            <button
+              onClick={() => clearMock({})}
+              className="font-bold rounded-md bg-white/10 px-3 py-1.5 text-[11px] tracking-wide text-zinc-400 hover:bg-white/20"
+            >
+              CLEAR
+            </button>
+          )}
           {currentEntry && (
             <span className="flex items-center gap-2 rounded-md bg-pink px-3 py-1.5 text-white font-bold">
               <span className="h-2 w-2 rounded-full bg-white animate-blink" />
@@ -251,6 +272,11 @@ function ChannelView({ data }: { data: ChannelData }) {
 }
 
 // ─── Player Component ────────────────────────────────────
+//
+// Dual-video buffer with canvas transition:
+//   A plays current clip → B preloads next clip
+//   On switch: canvas captures A's last frame → B plays → fade in
+//   250ms clock in ChannelView drives entry changes
 
 function Player({
   entry,
@@ -275,50 +301,132 @@ function Player({
 }) {
   const videoA = useRef<HTMLVideoElement>(null);
   const videoB = useRef<HTMLVideoElement>(null);
-  const [activeVideo, setActiveVideo] = useState(0);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [activeVideo, setActiveVideo] = useState<0 | 1>(0);
+  const [showCanvas, setShowCanvas] = useState(false);
+  const [started, setStarted] = useState(false);
   const entryId = entry?.id ?? null;
 
-  // Switch video when entry changes
+  // Track which video url each slot should have
+  const slotUrl = useRef<{ A: string | null; B: string | null }>({ A: null, B: null });
+
+  // Preload next clip into the inactive video element whenever nextEntry changes
   useEffect(() => {
-    if (!entry || !entryId) return;
-    if (!entry.clip?.videoUrl) return;
+    if (!nextEntry?.clip?.videoUrl) return;
+    const inactiveEl = activeVideo === 0 ? videoB.current : videoA.current;
+    const inactiveSlot = activeVideo === 0 ? "B" : "A";
+    if (!inactiveEl) return;
+    const url = nextEntry.clip.videoUrl;
+    if (slotUrl.current[inactiveSlot] !== url) {
+      slotUrl.current[inactiveSlot] = url;
+      inactiveEl.src = url;
+      inactiveEl.load();
+    }
+  }, [nextEntry?.clip?.videoUrl, activeVideo]);
 
-    const [primary, secondary] = activeVideo === 0
-      ? [videoA.current, videoB.current]
-      : [videoB.current, videoA.current];
+  // Handle entry switch: capture canvas frame, swap videos, play new
+  useEffect(() => {
+    if (!entry || !entryId || !entry.clip?.videoUrl) return;
 
-    if (!primary || !secondary) return;
+    const newUrl = entry.clip.videoUrl;
+    const activeEl = activeVideo === 0 ? videoA.current : videoB.current;
+    const inactiveEl = activeVideo === 0 ? videoB.current : videoA.current;
+    const activeSlot = activeVideo === 0 ? "A" : "B";
+    const inactiveSlot = activeVideo === 0 ? "B" : "A";
 
-    // Preload next video into the inactive element
-    if (nextEntry?.clip?.videoUrl) {
-      const inactive = activeVideo === 0 ? videoB.current : videoA.current;
-      if (inactive && inactive.src !== nextEntry.clip.videoUrl) {
-        inactive.src = nextEntry.clip.videoUrl;
-        inactive.load();
+    if (!activeEl || !inactiveEl) return;
+
+    // If the active video already has this URL (e.g. first load), just play
+    // Otherwise we need to swap to the inactive one (which should have preloaded)
+    let targetEl: HTMLVideoElement;
+    let targetSlot: "A" | "B";
+    let needSwap: boolean;
+
+    if (slotUrl.current[activeSlot] === newUrl) {
+      // Active video already has the right URL — just play it
+      targetEl = activeEl;
+      targetSlot = activeSlot;
+      needSwap = false;
+    } else if (slotUrl.current[inactiveSlot] === newUrl) {
+      // Inactive video has preloaded the right URL — swap to it
+      targetEl = inactiveEl;
+      targetSlot = inactiveSlot;
+      needSwap = true;
+    } else {
+      // Neither has it — load into inactive and swap
+      slotUrl.current[inactiveSlot] = newUrl;
+      inactiveEl.src = newUrl;
+      inactiveEl.load();
+      targetEl = inactiveEl;
+      targetSlot = inactiveSlot;
+      needSwap = true;
+    }
+
+    const playNew = () => {
+      // Capture last frame from the old active video to canvas (if it was playing)
+      if (needSwap && activeEl.readyState >= 2 && canvasRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          canvas.width = activeEl.videoWidth || 1280;
+          canvas.height = activeEl.videoHeight || 720;
+          try {
+            ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
+            setShowCanvas(true);
+          } catch {}
+        }
       }
+
+      // Align currentTime to server clock
+      const offset = (Date.now() + skewRef.current - entry.startAt) / 1000;
+      if (offset > 0.3 && targetEl.duration && offset < targetEl.duration - 0.3) {
+        targetEl.currentTime = offset;
+      }
+
+      targetEl.muted = muted;
+      targetEl.play().catch(() => {});
+
+      if (needSwap) {
+        // Swap active
+        setActiveVideo(targetSlot === "A" ? 0 : 1);
+        // Hide canvas after new video starts rendering
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            setShowCanvas(false);
+          });
+        });
+      }
+    };
+
+    if (targetEl.readyState >= 3) {
+      // Already buffered — play immediately
+      playNew();
+    } else {
+      // Wait for canplay
+      targetEl.muted = true; // start muted to allow autoplay
+      const handler = () => {
+        targetEl.removeEventListener("canplay", handler);
+        playNew();
+      };
+      targetEl.addEventListener("canplay", handler);
+      // If the URL was just set, load() was already called above
+      if (targetEl.src !== newUrl) {
+        targetEl.src = newUrl;
+        targetEl.load();
+      }
+      // Safety timeout: if canplay doesn't fire in 3s, play anyway
+      setTimeout(() => {
+        targetEl.removeEventListener("canplay", handler);
+        if (slotUrl.current[targetSlot] === newUrl) {
+          playNew();
+        }
+      }, 3000);
     }
 
-    // Set new source on primary
-    const url = entry.clip.videoUrl;
-    if (primary.src !== url) {
-      primary.src = url;
-      primary.load();
-    }
-
-    // Align currentTime
-    const offset = (Date.now() + skewRef.current - entry.startAt) / 1000;
-    if (offset > 0.5 && offset < primary.duration - 0.5) {
-      primary.currentTime = offset;
-    }
-
-    primary.muted = muted;
-    primary.play().catch(() => {});
-    secondary.pause();
-
-    setActiveVideo((v) => 1 - v);
+    setStarted(true);
   }, [entryId]); // eslint-disable-line
 
-  // Update mute state
+  // Update mute on active video
   useEffect(() => {
     const active = activeVideo === 0 ? videoA.current : videoB.current;
     if (active) active.muted = muted;
@@ -339,6 +447,14 @@ function Player({
             />
           )}
 
+          {/* Canvas transition frame (shown briefly during video swap) */}
+          <canvas
+            ref={canvasRef}
+            className={`absolute inset-0 h-full w-full object-contain z-20 transition-opacity duration-100 ${
+              showCanvas ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+          />
+
           {/* Dual video elements */}
           {[0, 1].map((i) => (
             <video
@@ -348,7 +464,7 @@ function Player({
               preload="auto"
               muted={i !== activeVideo || muted}
               className={`absolute inset-0 h-full w-full object-contain transition-opacity duration-100 ${
-                i === activeVideo ? "z-10 opacity-100" : "z-0 opacity-0 pointer-events-none"
+                i === activeVideo && !showCanvas ? "z-10 opacity-100" : "z-0 opacity-0 pointer-events-none"
               }`}
             />
           ))}

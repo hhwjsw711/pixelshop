@@ -1,6 +1,6 @@
 import { query, mutation } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
-import { api } from "./_generated/api";
 
 // ─── Seed: ensure default channel exists ──────────────────
 
@@ -227,6 +227,146 @@ export const sendChat = mutation({
       text: args.text,
       role: "viewer" as const,
     });
+  },
+});
+
+// ─── Seed mock data (P1 testing) ────────────────────────
+// Inserts 3 mock items with clips + schedule entries for playback testing.
+// Uses public sample MP4s (Big Buck Bunny / Sintel clips from Google storage).
+
+const MOCK_VIDEOS = [
+  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4", title: "Big Buck Bunny", price: "$19.99", dialogue: "Welcome to PixelShop! Today's first feature — Big Buck Bunny, the classic animated short. A story of revenge and justice in the forest.", image: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/320px-Big_buck_bunny_poster_big.jpg" },
+  { url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4", title: "Jellyfish Showcase", price: "$24.99", dialogue: "Our second feature — Jellyfish in crystal-clear 720p. A mesmerizing underwater showcase for the PixelShop player.", image: undefined as string | undefined },
+  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4", title: "Bunny Encore (360p)", price: "$9.99", dialogue: "And now, an encore presentation at 360p — a perfect demo of the PixelShop player's smooth resolution transitions.", image: undefined as string | undefined },
+];
+
+export const seedMockData = mutation({
+  args: {},
+  handler: async (ctx) => {
+    // Ensure channel
+    let channel = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+
+    if (!channel) {
+      const channelId = await ctx.db.insert("channels", {
+        slug: "main",
+        name: "PixelShop",
+        status: "standby",
+        segmentSeconds: 10,
+        offline: false,
+        items: [],
+        pending: [],
+      });
+      channel = await ctx.db.get(channelId)!;
+    }
+
+    // Check if already seeded
+    const existingClips = await ctx.db
+      .query("clips")
+      .withIndex("by_channel_status", (q) => q.eq("channelId", channel!._id))
+      .first();
+    if (existingClips) {
+      return { seeded: false, message: "Mock data already exists" };
+    }
+
+    const now = Date.now();
+    // Start schedule 5 seconds from now to allow client to load
+    let scheduleStart = now + 5000;
+    const itemIds: Id<"items">[] = [];
+
+    for (let i = 0; i < MOCK_VIDEOS.length; i++) {
+      const mv = MOCK_VIDEOS[i];
+
+      // Create item
+      const itemId = await ctx.db.insert("items", {
+        channelId: channel!._id,
+        url: mv.url,
+        title: mv.title,
+        price: mv.price,
+        image: mv.image,
+        itemNumber: `PX-${1000 + i + 1}`,
+        status: "ready",
+        generationDone: true,
+        playbackSeconds: 0,
+      });
+      itemIds.push(itemId);
+
+      // Create one clip per item (10s each)
+      const clipId = await ctx.db.insert("clips", {
+        channelId: channel!._id,
+        itemId,
+        videoUrl: mv.url,
+        durationMs: 10000,
+        dialogue: mv.dialogue,
+        source: "normal",
+        status: "ready",
+        retryCount: 0,
+        clipIndex: 0,
+      });
+
+      // Add to schedule
+      await ctx.db.insert("schedule", {
+        channelId: channel!._id,
+        itemId,
+        clipId,
+        startAt: scheduleStart,
+        durationMs: 10000,
+      });
+
+      scheduleStart += 10000; // next clip starts after this one
+    }
+
+    // Update channel
+    await ctx.db.patch(channel!._id, {
+      items: itemIds,
+      pending: [],
+      status: "live",
+    });
+
+    return { seeded: true, clipCount: MOCK_VIDEOS.length, startsAt: now + 5000 };
+  },
+});
+
+export const clearMockData = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const channel = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+    if (!channel) return { cleared: false };
+
+    // Delete all schedule entries
+    const schedules = await ctx.db
+      .query("schedule")
+      .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
+      .collect();
+    for (const s of schedules) await ctx.db.delete(s._id);
+
+    // Delete all clips
+    const clips = await ctx.db
+      .query("clips")
+      .withIndex("by_channel_status", (q) => q.eq("channelId", channel._id))
+      .collect();
+    for (const c of clips) await ctx.db.delete(c._id);
+
+    // Delete all items (mock ones only — those with status "ready")
+    const items = await ctx.db
+      .query("items")
+      .withIndex("by_channel", (q) => q.eq("channelId", channel._id))
+      .collect();
+    for (const it of items) await ctx.db.delete(it._id);
+
+    // Reset channel
+    await ctx.db.patch(channel._id, {
+      items: [],
+      pending: [],
+      status: "standby",
+    });
+
+    return { cleared: true, deletedSchedule: schedules.length, deletedClips: clips.length, deletedItems: items.length };
   },
 });
 
