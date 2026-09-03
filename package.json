@@ -6,9 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "deploy": "npx @convex-dev/static-hosting deploy --dist out --build-command \"set NEXT_PUBLIC_CONVEX_URL=https://fearless-otter-334.convex.cloud && next build\""
   },
   "dependencies": {
+    "@convex-dev/static-hosting": "^0.2.1",
     "@fal-ai/client": "^1.10.1",
     "cheerio": "^1.2.0",
     "convex": "^1.45.0",

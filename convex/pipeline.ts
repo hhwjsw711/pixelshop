@@ -405,8 +405,9 @@ export const runPipeline = action({
             const rawUrl = data?.video?.url;
             if (!rawUrl) throw new Error("No video in fal response");
 
-            // Proxy through same origin: /api/media?url=...
-            const proxiedUrl = `/api/media?url=${encodeURIComponent(rawUrl)}`;
+            // Use fal CDN URL directly — no server-side proxy needed since
+            // the player uses pure <video> + onEnded (no canvas CORS).
+            const videoUrl = rawUrl;
 
             // startAt is passed as a hint; the mutation will re-read the
             // actual last schedule end to prevent stale-read overlaps.
@@ -414,7 +415,7 @@ export const runPipeline = action({
 
             await ctx.runMutation(api.pipeline.addClipToSchedule, {
               itemId: args.itemId,
-              videoUrl: proxiedUrl,
+              videoUrl: videoUrl,
               dialogue: clip.dialogue,
               clipIndex: i,
               durationMs: CLIP_DURATION_MS,

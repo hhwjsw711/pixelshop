@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '9e010953-c08a-4ba1-b91c-121a2d399992'
-  PropagateID: '9e010953-c08a-4ba1-b91c-121a2d399992'
-  ReservedCode1: '88a0e197-af60-49fa-a418-d6249af4490c'
-  ReservedCode2: '88a0e197-af60-49fa-a418-d6249af4490c'
+  ProduceID: 'b74bcafc-2825-45e9-9afe-c09421825672'
+  PropagateID: 'b74bcafc-2825-45e9-9afe-c09421825672'
+  ReservedCode1: 'fa320fef-380c-44a6-bb58-0224055817cf'
+  ReservedCode2: 'fa320fef-380c-44a6-bb58-0224055817cf'
 ---
 
 # Hackathon log
@@ -14,16 +14,16 @@ AIGC:
 - **Project:** pixelshop
 - **Event:** Convex All Gas Hackathon
 - **What it does:** AI-generated live shopping channel where users submit product URLs and watch AI-hosted video segments air in real time.
-- **Live app:** not deployed yet
+- **Live app:** https://fearless-otter-334.convex.site
 - **Repo:** https://github.com/hhwjsw711/pixelshop (private)
-- **Frontend:** Convex static hosting
+- **Frontend:** Convex static hosting (live)
 - **Convex deployment:** dev:fearless-otter-334 (https://fearless-otter-334.convex.cloud)
-- **Components:** none
-- **Convex features:** database, real-time subscriptions, static hosting (planned)
-- **Auth:** none
+- **Components:** @convex-dev/static-hosting
+- **Convex features:** database, real-time subscriptions, static hosting, cron jobs
+- **Auth:** admin secret (clearMockData only)
 - **AI models:** fal H3 Max Turbo (text-to-video), OpenAI GPT-4o-mini (scriptwriting)
 - **Started:** 2026-09-03T22:12:32Z
-- **Last updated:** 2026-09-03T23:15:00Z
+- **Last updated:** 2026-09-04T00:10:00Z
 
 ## Log
 
@@ -83,5 +83,64 @@ P2 acceptance test: submitted apple.com/apple-vision-pro → LIVE in ~15s with
 AI subtitle "Introducing the revolutionary Apple Vision Pro..." → clip 2
 seamless: "your Apple Vision Pro today for just $3499!" → clip 3 aired →
 standby. 3 clips, 30s total, zero console errors.
+
+> AI生成
+
+### 2026-09-03 - P2.5 rotation loop + three-state UI
+P2.5 milestone reached. Cron-based rotation loop: rotateSchedule runs every 1
+minute, promoting pending items to scheduled status and cycling the schedule.
+Three-state product list: CURRENT (live now), UP NEXT (queued), PAST PRODUCTS
+(aired). Schedule entries use startAt timestamps with serverNow skew alignment.
+First clip auto-plays on page load. Standby screen shown when no clips scheduled.
+TypeScript typecheck passes. Next.js build succeeds. Deployed to Convex cloud.
+
+> AI生成
+
+### 2026-09-03 - player rearchitect
+Player rewritten from dual-video canvas buffer to single <video> + onEnded
+drive. Proxy media route (/api/media) added to stream fal CDN videos through
+same origin, eliminating canvas CORS issues. Subtitles bound to clip via React
+key remount. Hold timer replays last clip when no next clip is available.
+This simplified the player from ~300 lines to ~150 and removed the 250ms clock
+tick entirely.
+
+> AI生成
+
+### 2026-09-03 - adversarial audit + fixes
+Two-round adversarial code audit completed. Round 1 identified 8 severe + 7
+high-priority issues. Round 2 corrected round 1 misdiagnoses (rotateSchedule
+"race condition" was wrong — Convex mutations are serialized) and found missed
+player clock/onEnded race. 15 fixes applied across 8 files (+251 / -123 lines):
+
+- S1: Rate limiting on submitProduct (max 5 queued/working per 10 min) + admin
+  secret required for clearMockData
+- S2: SSRF protection — backend URL validation + private IP rejection on
+  scrapeProduct
+- S3: Action stale-read prevention — addClipToSchedule mutation re-reads last
+  schedule end to prevent overlap
+- S4: Player switched from 250ms clock to onEnded event-driven clip switching
+- H1: recoverStuckItems cron every 5 min for items stuck in working > 5 min
+- H3: Removed SEED DEMO / CLEAR buttons from UI
+- H4: Clip generation 2x retry with 500ms backoff, pollInterval 500ms → 1000ms
+- H5: Media proxy 30s timeout + force-cache
+- H6: Removed dead code (standbyMsg, needsTap, undefined question field)
+- H7: Removed unused openai dependency
+- M1: itemNumber uses max(existing) + 1 instead of length + 1
+- M10: Fixed schema.ts comment encoding garble
+
+TypeScript typecheck passes. Deployed to Convex cloud. Pushed to GitHub
+(commit e2ae6ee).
+
+> AI生成
+
+### 2026-09-04 - Convex static hosting deployment
+Frontend deployed via @convex-dev/static-hosting. Component mounted at root
+path (/), Convex backend functions under /api. Next.js configured with
+output: "export" for static HTML generation. Removed /api/media proxy route
+(incompatible with static export — no server runtime). Pipeline now stores raw
+fal CDN URLs directly since player uses pure <video> + onEnded (no canvas CORS).
+Uploaded 37 static files (HTML + JS chunks + CSS + fonts). App live at
+https://fearless-otter-334.convex.site. Verified: HTTP 200, all assets load,
+PixelShop UI renders, Convex client connects to backend.
 
 > AI生成
