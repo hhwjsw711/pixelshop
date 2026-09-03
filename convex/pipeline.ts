@@ -372,16 +372,20 @@ export const runPipeline = action({
           const rawUrl = data?.video?.url;
           if (!rawUrl) throw new Error("No video in fal response");
 
+          // Ensure startAt is never in the past: if generation took longer
+          // than expected, push the start time forward
+          const actualStart = Math.max(scheduleStart, Date.now() + 2000);
+
           await ctx.runMutation(api.pipeline.addClipToSchedule, {
             itemId: args.itemId,
             videoUrl: rawUrl,
             dialogue: clip.dialogue,
             clipIndex: i,
             durationMs: CLIP_DURATION_MS,
-            startAt: scheduleStart,
+            startAt: actualStart,
           });
 
-          scheduleStart += CLIP_DURATION_MS;
+          scheduleStart = actualStart + CLIP_DURATION_MS;
           successCount++;
         } catch (e) {
           console.error(`Clip ${i} generation failed:`, e);
