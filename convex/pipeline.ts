@@ -3,7 +3,6 @@ import { v } from "convex/values";
 import { api } from "./_generated/api";
 import * as cheerio from "cheerio";
 import { fal } from "@fal-ai/client";
-import OpenAI from "openai";
 
 // ─── Query: last schedule end time ─────────────────────────
 // Used by the pipeline to append new clips after existing schedule.
@@ -230,21 +229,33 @@ async function generateScript(
   try {
     if (!process.env.OPENAI_API_KEY) throw new Error("No OpenAI key");
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const userPrompt = `Product: ${title}${price ? `\nPrice: ${price}` : ""}\nURL: ${url}\n\nWrite 3 clips for this product presentation.`;
 
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      response_format: { type: "json_object" },
-      max_tokens: 1200,
-      temperature: 0.8,
+    // Use fetch directly — OpenAI SDK is incompatible with Convex's action runtime
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userPrompt },
+        ],
+        response_format: { type: "json_object" },
+        max_tokens: 1200,
+        temperature: 0.8,
+      }),
     });
 
-    const content = response.choices[0]?.message?.content;
+    if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
+
+    const data = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = data.choices?.[0]?.message?.content;
     if (!content) throw new Error("No response from OpenAI");
 
     const parsed = JSON.parse(content);
