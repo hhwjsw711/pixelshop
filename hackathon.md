@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'c9c8dda7-4778-4e18-a8bf-1a229b3fcf01'
-  PropagateID: 'c9c8dda7-4778-4e18-a8bf-1a229b3fcf01'
-  ReservedCode1: 'dd109e15-7c01-4560-8178-464389dbfe13'
-  ReservedCode2: 'dd109e15-7c01-4560-8178-464389dbfe13'
+  ProduceID: '9e010953-c08a-4ba1-b91c-121a2d399992'
+  PropagateID: '9e010953-c08a-4ba1-b91c-121a2d399992'
+  ReservedCode1: '88a0e197-af60-49fa-a418-d6249af4490c'
+  ReservedCode2: '88a0e197-af60-49fa-a418-d6249af4490c'
 ---
 
 # Hackathon log
@@ -21,9 +21,9 @@ AIGC:
 - **Components:** none
 - **Convex features:** database, real-time subscriptions, static hosting (planned)
 - **Auth:** none
-- **AI models:** none yet
+- **AI models:** fal H3 Max Turbo (text-to-video), OpenAI GPT-4o-mini (scriptwriting)
 - **Started:** 2026-09-03T22:12:32Z
-- **Last updated:** 2026-09-03T22:46:00Z
+- **Last updated:** 2026-09-03T23:15:00Z
 
 ## Log
 
@@ -64,5 +64,24 @@ Verified in browser: BigBuckBunny 720p plays → seamless switch to Jellyfish 72
 (no black screen, no transition artifact) → third clip (Bunny 360p) preloaded.
 Subtitles, LIVE badge, product info, BUY NOW all update correctly per clip.
 TypeScript typecheck passes. Next.js build succeeds. Deployed to Convex cloud.
+
+> AI生成
+
+### 2026-09-03 - P2 generation pipeline complete
+P2 milestone reached. Full AI generation pipeline: user submits product URL →
+cheerio scrapes title/price/image → OpenAI GPT-4o-mini writes 3 clip scripts
+(intro → features → call-to-action) → fal H3 Max Turbo generates 10s 720p videos
+→ clips auto-scheduled and aired live. Convex action `runPipeline` orchestrates
+the full flow with mutations for each step (updateItemDetails, markItemWorking,
+addClipToSchedule, finalizeItem, failItem). Added same-origin media proxy
+(/api/media) for fal CDN videos (canvas CORS). SubmitBox polls item status
+and auto-recovers when generation completes. Schedule startAt ensures clips
+never schedule in the past. Fixes: OpenAI SDK replaced with fetch (Convex
+action incompatibility), Amazon title cleanup, price scraping filter.
+
+P2 acceptance test: submitted apple.com/apple-vision-pro → LIVE in ~15s with
+AI subtitle "Introducing the revolutionary Apple Vision Pro..." → clip 2
+seamless: "your Apple Vision Pro today for just $3499!" → clip 3 aired →
+standby. 3 clips, 30s total, zero console errors.
 
 > AI生成
