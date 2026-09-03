@@ -9,6 +9,7 @@
  */
 
 import type * as channel from "../channel.js";
+import type * as crons from "../crons.js";
 import type * as pipeline from "../pipeline.js";
 
 import type {
@@ -19,6 +20,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   channel: typeof channel;
+  crons: typeof crons;
   pipeline: typeof pipeline;
 }>;
 

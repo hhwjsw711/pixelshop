@@ -1,4 +1,4 @@
-import { query, mutation } from "./_generated/server";
+import { query, mutation, internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 
@@ -41,10 +41,12 @@ export const getChannel = query({
     if (!channel) return null;
 
     // Fetch schedule entries
-    const scheduleDocs = await ctx.db
+    // Get newest 200 entries (reverse to chronological order)
+    const scheduleDocs = (await ctx.db
       .query("schedule")
       .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
-      .take(200);
+      .order("desc")
+      .take(200)).reverse();
 
     // Enrich schedule with item + clip data
     const schedule = await Promise.all(
@@ -377,7 +379,7 @@ export const getItem = query({
   handler: async (ctx, args) => {
     const item = await ctx.db.get(args.itemId);
     if (!item) return null;
-    return {
+  return {
       id: item._id,
       itemNumber: item.itemNumber,
       title: item.title,
@@ -387,5 +389,84 @@ export const getItem = query({
       status: item.status,
       error: item.error,
     };
+  },
+});
+
+// ─── Rotate schedule (cron-triggered) ─────────────────────
+// When the schedule is about to end, re-queue rotation items' clips.
+// Round-robin: starts from the next item after the last played one.
+// Adds enough cycles to cover at least 2 minutes of future content.
+
+export const rotateSchedule = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const channel = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+    if (!channel) return { rotated: false, reason: "no channel" };
+
+    // Get the last schedule entry
+    const lastEntry = await ctx.db
+      .query("schedule")
+      .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
+      .order("desc")
+      .first();
+    if (!lastEntry) return { rotated: false, reason: "no schedule" };
+
+    const lastEndAt = lastEntry.startAt + lastEntry.durationMs;
+    const now = Date.now();
+
+    // Only rotate if schedule ends within 60 seconds (or already ended)
+    if (lastEndAt > now + 60_000) return { rotated: false, reason: "not ending soon" };
+
+    // Get rotation items
+    const rotationIds = channel.items;
+    if (rotationIds.length === 0) return { rotated: false, reason: "no rotation items" };
+
+    // Round-robin: find the next item after the last played one
+    const lastIndex = rotationIds.findIndex((id) => id === lastEntry.itemId);
+    let nextIndex = lastIndex >= 0 ? (lastIndex + 1) % rotationIds.length : 0;
+
+    // Add rotation cycles until we have at least 2 minutes of future content
+    let scheduleStart = Math.max(lastEndAt, now + 2000);
+    let added = 0;
+    const targetEnd = now + 120_000; // 2 minutes from now
+    let safety = 0;
+
+    while (scheduleStart < targetEnd && safety < 100) {
+      const itemId = rotationIds[nextIndex % rotationIds.length];
+
+      // Get this item's ready clips, ordered by clipIndex
+      const allClips = await ctx.db
+        .query("clips")
+        .withIndex("by_item", (q) => q.eq("itemId", itemId))
+        .collect();
+      const readyClips = allClips
+        .filter((c) => c.status === "ready")
+        .sort((a, b) => a.clipIndex - b.clipIndex);
+
+      for (const clip of readyClips) {
+        await ctx.db.insert("schedule", {
+          channelId: channel._id,
+          itemId,
+          clipId: clip._id,
+          startAt: scheduleStart,
+          durationMs: clip.durationMs,
+        });
+        scheduleStart += clip.durationMs;
+        added++;
+      }
+
+      nextIndex++;
+      safety++;
+    }
+
+    // Ensure channel is live
+    if (channel.status !== "live") {
+      await ctx.db.patch(channel._id, { status: "live" });
+    }
+
+    return { rotated: true, added };
   },
 });

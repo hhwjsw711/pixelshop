@@ -240,7 +240,8 @@ function ChannelView({ data }: { data: ChannelData }) {
           <ProductList
             rotation={rotation}
             pending={pending}
-            currentId={currentEntry?.item?.id ?? null}
+            schedule={data.schedule}
+            now={now}
             loaded={!!data.serverNow}
             offline={data.offline}
             onSelect={setSelectedItem}
@@ -801,43 +802,91 @@ function SubmitBox({
 }
 
 // ─── Product List ────────────────────────────────────────
+// Displays CURRENT / UP NEXT / PAST PRODUCTS based on schedule timeline.
+// Uses schedule entries (time-ordered) to determine which items are
+// currently playing, coming up, or have already aired.
 
 function ProductList({
   rotation,
   pending,
-  currentId,
+  schedule,
+  now,
   loaded,
   offline,
   onSelect,
 }: {
   rotation: RotationItem[];
   pending: PendingItem[];
-  currentId: string | null;
+  schedule: ScheduleEntry[];
+  now: number;
   loaded: boolean;
   offline: boolean;
   onSelect: (item: RotationItem) => void;
 }) {
-  const current = rotation.find((e) => e.id === currentId);
-  const upcoming = rotation.filter((e) => e.id !== currentId).reverse().slice(0, 10);
+  // Split schedule into past / current / future based on `now`
+  const pastEntries: ScheduleEntry[] = [];
+  let currentSchedEntry: ScheduleEntry | null = null;
+  const futureEntries: ScheduleEntry[] = [];
+
+  for (const entry of schedule) {
+    const endAt = entry.startAt + entry.duration * 1000;
+    if (now >= entry.startAt && now < endAt) {
+      currentSchedEntry = entry;
+    } else if (endAt <= now) {
+      pastEntries.push(entry);
+    } else if (entry.startAt > now) {
+      futureEntries.push(entry);
+    }
+  }
+
+  // Derive item-level lists from schedule entries
+  // Current item (deduplicated by item id)
+  const currentRotationItem = currentSchedEntry?.item
+    ? rotation.find((r) => r.id === currentSchedEntry!.item!.id) ?? null
+    : null;
+
+  // Up next: unique item ids from future entries, excluding current
+  const seenIds = new Set<string>();
+  if (currentSchedEntry?.item) seenIds.add(currentSchedEntry.item.id);
+  const upNextItems: RotationItem[] = [];
+  for (const entry of futureEntries) {
+    if (entry.item && !seenIds.has(entry.item.id)) {
+      seenIds.add(entry.item.id);
+      const r = rotation.find((r) => r.id === entry.item!.id);
+      if (r) upNextItems.push(r);
+    }
+  }
+
+  // Past products: unique item ids from past entries (most recent first)
+  const pastSeenIds = new Set<string>();
+  const pastItems: RotationItem[] = [];
+  for (let i = pastEntries.length - 1; i >= 0; i--) {
+    const entry = pastEntries[i];
+    if (entry.item && !pastSeenIds.has(entry.item.id)) {
+      pastSeenIds.add(entry.item.id);
+      const r = rotation.find((r) => r.id === entry.item!.id);
+      if (r) pastItems.push(r);
+    }
+  }
 
   return (
     <div className="flex-1 min-h-0 max-h-[calc(100vh-16rem)] overflow-y-auto rounded-2xl border border-white/10 bg-panel/60 backdrop-blur">
       <section>
         <SectionLabel label="CURRENT PRODUCT" />
-        {!current && (
+        {!currentRotationItem && (
           <p className="px-4 py-6 text-center text-xs text-zinc-600">
             {loaded ? "Nothing on air yet — be the first sponsor!" : "Tuning in…"}
           </p>
         )}
-        {current && (
-          <ProductRow item={current} highlight onClicValue={() => onSelect(current)} />
+        {currentRotationItem && (
+          <ProductRow item={currentRotationItem} highlight onClicValue={() => onSelect(currentRotationItem)} />
         )}
       </section>
 
-      {(upcoming.length > 0 || pending.length > 0) && (
+      {(upNextItems.length > 0 || pending.length > 0) && (
         <section>
           <SectionLabel label="UP NEXT" />
-          {upcoming.map((item) => (
+          {upNextItems.map((item) => (
             <ProductRow key={item.id} item={item} onClicValue={() => onSelect(item)} />
           ))}
           {pending.map((item) => (
@@ -851,6 +900,15 @@ function ProductList({
                 </p>
               </div>
             </div>
+          ))}
+        </section>
+      )}
+
+      {pastItems.length > 0 && (
+        <section>
+          <SectionLabel label="PAST PRODUCTS" />
+          {pastItems.map((item) => (
+            <ProductRow key={item.id} item={item} onClicValue={() => onSelect(item)} />
           ))}
         </section>
       )}
