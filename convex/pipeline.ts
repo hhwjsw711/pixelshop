@@ -200,18 +200,35 @@ async function scrapeProduct(
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    const title =
+    const rawTitle =
       $('meta[property="og:title"]').attr("content")?.trim() ||
       $("title").text().trim() ||
-      undefined;
+      "";
+    // Clean up Amazon-style titles: "Amazon.com: Product Name : Category"
+    let title: string | undefined = rawTitle.replace(/^Amazon\.com\s*:\s*/i, "").replace(/\s*:\s*\w+\s*$/, "").trim();
+    if (title.length > 100) title = title.slice(0, 97) + "...";
+    if (!title) title = undefined;
+
     const image =
       $('meta[property="og:image"]').attr("content")?.trim() ||
       $('meta[name="twitter:image"]').attr("content")?.trim() ||
       undefined;
-    const price =
+
+    // Price: try structured data first, then visible price elements, filter out non-price text
+    const rawPrice =
       $('[itemprop="price"]').attr("content")?.trim() ||
-      $('[class*="price"]').first().text().trim().slice(0, 20) ||
-      undefined;
+      $('meta[property="product:price:amount"]').attr("content")?.trim() ||
+      "";
+    let price: string | undefined;
+    if (rawPrice && /^[\$£€¥¥\d.,\s]+/.test(rawPrice)) {
+      price = rawPrice.slice(0, 20);
+    } else {
+      // Try visible price elements, but filter out non-price text
+      const priceText = $('[class*="price"], [id*="price"], [data-price]').first().text().trim();
+      if (/^[\$£€¥¥]?[\d,]+\.?\d{0,2}/.test(priceText)) {
+        price = priceText.slice(0, 20);
+      }
+    }
 
     return { title, price, image };
   } catch {

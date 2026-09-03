@@ -670,9 +670,26 @@ function SubmitBox({
   const [status, setStatus] = useState<"idle" | "submitting" | "working" | "ready" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
   const [itemNumber, setItemNumber] = useState<string | null>(null);
+  const [pollItemId, setPollItemId] = useState<string | null>(null);
 
   const submitProduct = useMutation(api.channel.submitProduct);
   const runPipeline = useAction(api.pipeline.runPipeline);
+  const itemStatus = useQuery(api.channel.getItem, pollItemId ? { itemId: pollItemId as any } : "skip");
+
+  // Poll item status: when it becomes ready/failed, update SubmitBox status
+  useEffect(() => {
+    if (!itemStatus || !pollItemId) return;
+    if (itemStatus.status === "ready") {
+      setStatus("ready");
+      setPollItemId(null);
+      // Auto-reset to idle after 5s so user can submit another product
+      setTimeout(() => setStatus("idle"), 5000);
+    } else if (itemStatus.status === "failed") {
+      setStatus("failed");
+      setError(itemStatus.error ?? "Generation failed");
+      setPollItemId(null);
+    }
+  }, [itemStatus, pollItemId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -694,6 +711,7 @@ function SubmitBox({
       setPrice("");
       setImage("");
       setStatus("working");
+      setPollItemId(result.itemId);
       onSubmitted();
 
       // Fire the pipeline — don't await; it runs in the background
