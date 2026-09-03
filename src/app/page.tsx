@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { useEffect, useRef, useState, useCallback } from "react";
 
@@ -672,6 +672,7 @@ function SubmitBox({
   const [itemNumber, setItemNumber] = useState<string | null>(null);
 
   const submitProduct = useMutation(api.channel.submitProduct);
+  const runPipeline = useAction(api.pipeline.runPipeline);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -694,6 +695,9 @@ function SubmitBox({
       setImage("");
       setStatus("working");
       onSubmitted();
+
+      // Fire the pipeline — don't await; it runs in the background
+      runPipeline({ itemId: result.itemId }).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       setStatus("failed");

@@ -9,6 +9,7 @@
  */
 
 import type * as channel from "../channel.js";
+import type * as pipeline from "../pipeline.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +19,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   channel: typeof channel;
+  pipeline: typeof pipeline;
 }>;
 
 /**
