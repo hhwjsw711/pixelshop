@@ -148,16 +148,24 @@ function ChannelView({ data }: { data: ChannelData }) {
     return () => clearInterval(interval);
   }, [data.serverNow]);
 
+  // Sort schedule ascending by startAt — backend returns descending,
+  // but all time-based logic (findPosition, findNext, ProductList)
+  // requires ascending order.
+  const sortedSchedule = useMemo(
+    () => [...data.schedule].sort((a, b) => a.startAt - b.startAt),
+    [data.schedule],
+  );
+
   // Time-driven clip selection — same logic as ProductList, so player
   // and list are always in sync. No clipIndex, no onEnded-driven advance.
   const currentEntry = useMemo(() => {
-    const pos = findPosition(data.schedule, now);
+    const pos = findPosition(sortedSchedule, now);
     return pos?.entry ?? null;
-  }, [data.schedule, now]);
+  }, [sortedSchedule, now]);
 
   const nextEntry = useMemo(
-    () => findNext(data.schedule, now),
-    [data.schedule, now],
+    () => findNext(sortedSchedule, now),
+    [sortedSchedule, now],
   );
 
   const rotation = data.rotation ?? [];
@@ -199,7 +207,7 @@ function ChannelView({ data }: { data: ChannelData }) {
             muted={muted}
             onToggleMute={() => setMuted((m) => !m)}
             pendingCount={pending.length}
-            hasCurrent={data.schedule.length > 0}
+            hasCurrent={sortedSchedule.length > 0}
             offline={data.offline}
             loaded={!!data.serverNow}
             skewRef={skewRef}
@@ -214,7 +222,7 @@ function ChannelView({ data }: { data: ChannelData }) {
           <ProductList
             rotation={rotation}
             pending={pending}
-            schedule={data.schedule}
+            schedule={sortedSchedule}
             now={now}
             loaded={!!data.serverNow}
             offline={data.offline}
@@ -717,15 +725,18 @@ function ProductList({
     }
   }
 
-  // Derive item-level lists from schedule entries
-  // Current item (deduplicated by item id)
+  // Derive item-level lists from schedule entries.
+  // A single global seenIds set ensures each item appears in exactly
+  // one section — never duplicated across CURRENT / UP NEXT / PAST.
+
   const currentRotationItem = currentSchedEntry?.item
     ? rotation.find((r) => r.id === currentSchedEntry!.item!.id) ?? null
     : null;
 
-  // Up next: unique item ids from future entries, excluding current
   const seenIds = new Set<string>();
   if (currentSchedEntry?.item) seenIds.add(currentSchedEntry.item.id);
+
+  // Up next: first occurrence of each item in future entries (ascending)
   const upNextItems: RotationItem[] = [];
   for (const entry of futureEntries) {
     if (entry.item && !seenIds.has(entry.item.id)) {
@@ -735,13 +746,13 @@ function ProductList({
     }
   }
 
-  // Past products: unique item ids from past entries (most recent first)
-  const pastSeenIds = new Set<string>();
+  // Past products: iterate past entries newest-first (descending startAt),
+  // collect items not already shown in CURRENT or UP NEXT.
   const pastItems: RotationItem[] = [];
   for (let i = pastEntries.length - 1; i >= 0; i--) {
     const entry = pastEntries[i];
-    if (entry.item && !pastSeenIds.has(entry.item.id)) {
-      pastSeenIds.add(entry.item.id);
+    if (entry.item && !seenIds.has(entry.item.id)) {
+      seenIds.add(entry.item.id);
       const r = rotation.find((r) => r.id === entry.item!.id);
       if (r) pastItems.push(r);
     }
