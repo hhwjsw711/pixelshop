@@ -217,8 +217,10 @@ function ChannelView({ data }: { data: ChannelData }) {
         </div>
 
         {/* Left: Product List */}
-        <aside className="hidden lg:flex w-80 flex-col gap-3 min-h-0 lg:order-1">
-          <SubmitBox offline={data.offline} onSubmitted={() => {}} />
+        <aside className="flex w-full lg:w-80 flex-col gap-3 min-h-0 lg:order-1 max-h-[40vh] lg:max-h-none">
+          <div className="hidden lg:block">
+            <SubmitBox offline={data.offline} onSubmitted={() => {}} />
+          </div>
           <ProductList
             rotation={rotation}
             pending={pending}
@@ -378,14 +380,11 @@ function Player({
             />
           )}
 
-          {/* Live badge */}
+          {/* Live badge — visible whenever a clip is playing */}
           <div className="absolute left-4 top-4 z-20 flex items-center gap-2 font-mono text-[11px] tracking-widest">
-            {(!entry.item?.generationDone ||
-              (Date.now() + skewRef.current - (entry.item?.newestClipAt ?? 0) < 300000)) && (
-              <span className="rounded bg-pink px-2 py-1 font-bold text-white">
-                ● LIVE
-              </span>
-            )}
+            <span className="rounded bg-pink px-2 py-1 font-bold text-white">
+              ● LIVE
+            </span>
           </div>
 
           {/* Mute toggle */}
@@ -672,10 +671,10 @@ function SubmitBox({
         </p>
       )}
       {status === "ready" && itemNumber && (
-        <p className="mt-3 text-xs">
-          <span className="font-bold text-gold">YOU&apos;RE ON AIR! 📺</span>{" "}
-          <span className="text-zinc-500">{itemNumber} just joined the rotation.</span>
-        </p>
+        <div className="animate-fadeIn mt-3 rounded-lg border border-gold/30 bg-gold/10 px-3 py-2.5 text-xs">
+          <p className="font-bold text-gold">YOU&apos;RE ON AIR!</p>
+          <p className="mt-0.5 text-zinc-400">{itemNumber} just joined the rotation. Watch it live in the player.</p>
+        </div>
       )}
       {status === "failed" && error && (
         <p className="mt-3 text-xs text-[#ff8a8a]">
@@ -759,7 +758,7 @@ function ProductList({
   }
 
   return (
-    <div className="flex-1 min-h-0 max-h-[calc(100vh-16rem)] overflow-y-auto rounded-2xl border border-white/10 bg-panel/60 backdrop-blur">
+    <div className="flex-1 min-h-0 max-h-[calc(100vh-16rem)] lg:max-h-[calc(100vh-16rem)] overflow-y-auto rounded-2xl border border-white/10 bg-panel/60 backdrop-blur">
       <section>
         <SectionLabel label="CURRENT PRODUCT" />
         {!currentRotationItem && (
@@ -875,7 +874,7 @@ function ItemModal({ item, onClose }: { item: RotationItem; onClose: () => void 
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-panel p-5 shadow-[0_0_60px_rgba(255,45,120,0.25)]"
+        className="animate-fadeIn w-full max-w-md rounded-2xl border border-white/10 bg-panel p-5 shadow-[0_0_60px_rgba(255,45,120,0.25)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">

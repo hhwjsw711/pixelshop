@@ -14,8 +14,21 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://fearless-otter-334.convex.site"),
   title: "PixelShop — The AI Shopping Network",
   description: "A 24/7 AI-generated home shopping channel. Submit any product URL and watch it go live on air.",
+  openGraph: {
+    title: "PixelShop — The AI Shopping Network",
+    description: "Submit any product URL and watch it go live on air. AI-hosted. AI-generated. Always on.",
+    siteName: "PixelShop",
+    type: "website",
+    images: [{ url: "/favicon.ico", width: 32, height: 32, alt: "PixelShop" }],
+  },
+  twitter: {
+    card: "summary",
+    title: "PixelShop — The AI Shopping Network",
+    description: "Submit any product URL and watch it go live on air. AI-hosted. AI-generated. Always on.",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -40,13 +40,14 @@ export const getChannel = query({
 
     if (!channel) return null;
 
-    // Fetch schedule entries — only future + recent past (last 60s)
-    // to avoid reading expired entries and reduce db.get count.
+    // Fetch schedule entries — recent past (5 min) + all future
+    // 5-min window keeps PAST PRODUCTS visible long enough for viewers
+    // to see what just aired, while limiting DB reads.
     const now = Date.now();
     const scheduleDocs = (await ctx.db
       .query("schedule")
       .withIndex("by_channel_start", (q) =>
-        q.eq("channelId", channel._id).gte("startAt", now - 60_000)
+        q.eq("channelId", channel._id).gte("startAt", now - 300_000)
       )
       .order("asc")
       .take(50)).reverse();
@@ -547,10 +548,12 @@ export const rotateSchedule = internalMutation({
 
     // ── Clean up expired schedule entries (endAt < now) ──
     // Prevents the schedule table from growing unbounded.
+    // Also accumulates playback seconds per item before deletion.
     // Uses the by_channel_start index: old entries have small startAt.
     // We query a batch of entries ordered ascending and delete those
     // whose (startAt + durationMs) < now. Stop at first non-expired.
     let cleaned = 0;
+    const playbackDelta = new Map<string, number>(); // itemId → seconds to add
     let cleanupDone = false;
     while (!cleanupDone) {
       const batch = await ctx.db
@@ -562,6 +565,9 @@ export const rotateSchedule = internalMutation({
       let allExpired = true;
       for (const entry of batch) {
         if (entry.startAt + entry.durationMs < now) {
+          // Accumulate playback seconds before deleting
+          const seconds = entry.durationMs / 1000;
+          playbackDelta.set(entry.itemId, (playbackDelta.get(entry.itemId) ?? 0) + seconds);
           await ctx.db.delete(entry._id);
           cleaned++;
         } else {
@@ -570,6 +576,16 @@ export const rotateSchedule = internalMutation({
         }
       }
       if (!allExpired || batch.length < 50) { cleanupDone = true; }
+    }
+
+    // Apply accumulated playback seconds to items
+    for (const [itemId, seconds] of playbackDelta) {
+      const item = await ctx.db.get(itemId as Id<"items">);
+      if (item) {
+        await ctx.db.patch(itemId as Id<"items">, {
+          playbackSeconds: (item.playbackSeconds ?? 0) + seconds,
+        });
+      }
     }
 
     // Get the last schedule entry

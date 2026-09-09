@@ -253,6 +253,7 @@ async function sendNotificationEmail(
   inboxId: string,
   to: string,
   subject: string,
+  html: string,
   text: string,
 ): Promise<boolean> {
   const key = process.env.AGENTMAIL_API_KEY;
@@ -270,7 +271,7 @@ async function sendNotificationEmail(
           "Content-Type": "application/json",
           Authorization: `Bearer ${key}`,
         },
-        body: JSON.stringify({ to, subject, text }),
+        body: JSON.stringify({ to, subject, html, text }),
         signal: controller.signal,
       },
     );
@@ -279,6 +280,59 @@ async function sendNotificationEmail(
   } catch {
     return false;
   }
+}
+
+// ─── HTML email template for product-live notifications ──────
+
+function buildProductLiveEmail(data: {
+  title: string;
+  price?: string;
+  image?: string;
+  url: string;
+  itemNumber: string;
+  clipCount: number;
+  totalDuration: number;
+}): string {
+  const priceBlock = data.price
+    ? `<tr><td style="padding:0 0 8px"><span style="font-size:28px;font-weight:800;color:#ffd24a;letter-spacing:-0.02em">${data.price}</span></td></tr>`
+    : "";
+  const imageBlock = data.image
+    ? `<tr><td style="padding:0 0 20px"><img src="${data.image}" alt="${data.title}" style="width:100%;max-width:480px;border-radius:12px;border:1px solid #ffffff15" /></td></tr>`
+    : "";
+  const durSec = Math.round(data.totalDuration / 1000);
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0f;min-height:100vh">
+<tr><td align="center" style="padding:32px 16px">
+<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#141019;border-radius:16px;border:1px solid #ffffff10;overflow:hidden">
+  <tr><td style="padding:24px 32px 0;text-align:center">
+    <span style="font-size:22px;font-weight:800;letter-spacing:-0.03em;color:#ff2d78">PIXELSHOP</span>
+    <span style="font-size:10px;font-weight:500;letter-spacing:0.25em;color:#38e8ff;opacity:0.7;margin-left:8px">AI SHOPPING NETWORK</span>
+  </td></tr>
+  <tr><td style="padding:4px 32px 24px;text-align:center">
+    <p style="font-size:11px;font-weight:600;letter-spacing:0.15em;color:#ff2d78;margin:0">● YOU'RE ON AIR</p>
+  </td></tr>
+  <tr><td style="padding:0 32px">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      ${imageBlock}
+      <tr><td style="padding:0 0 6px"><span style="font-size:11px;font-weight:700;letter-spacing:0.1em;color:#ffd24a;background:#ffd24a15;padding:3px 8px;border-radius:4px">ITEM ${data.itemNumber}</span></td></tr>
+      <tr><td style="padding:0 0 8px"><h2 style="font-size:20px;font-weight:700;color:#ffffff;margin:0;line-height:1.3">${data.title}</h2></td></tr>
+      ${priceBlock}
+      <tr><td style="padding:0 0 16px"><p style="font-size:13px;color:#9ca3af;margin:0">${data.clipCount} clips generated &middot; ${durSec}s total runtime &middot; now airing in rotation</p></td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:0 32px 32px" align="center">
+    <a href="https://fearless-otter-334.convex.site" style="display:inline-block;background:linear-gradient(180deg,#ff2d78,#c2185b);color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;padding:14px 40px;border-radius:10px;box-shadow:0 4px 20px rgba(255,45,120,0.3)">WATCH ON PIXELSHOP →</a>
+    <p style="font-size:11px;color:#6b7280;margin:16px 0 0"><a href="${data.url}" style="color:#6b7280;text-decoration:underline">View original product page</a></p>
+  </td></tr>
+  <tr><td style="padding:16px 32px 24px;border-top:1px solid #ffffff08">
+    <p style="font-size:10px;color:#4b5563;margin:0;text-align:center;line-height:1.6">PixelShop — The AI Shopping Network<br>Product submitted at ${new Date().toISOString()} UTC</p>
+  </td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
 }
 
 // ─── Helper: Firecrawl product scrape (primary) ──────────
@@ -675,11 +729,23 @@ export const runPipeline = action({
         const inboxId = process.env.AGENTMAIL_INBOX_ID;
         const notifyTo = process.env.AGENTMAIL_NOTIFY_TO;
         if (inboxId && notifyTo) {
+          const totalDurationMs = clips.reduce((sum, c) => sum + c.durationSec * 1000, 0);
+          const html = buildProductLiveEmail({
+            title,
+            price: price ?? undefined,
+            image: image ?? undefined,
+            url: item.url,
+            itemNumber: item.itemNumber,
+            clipCount: successCount,
+            totalDuration: totalDurationMs,
+          });
+          const plainText = `"${title}" is now live on PixelShop!${price ? `\nPrice: ${price}` : ""}\nURL: ${item.url}\n\nWatch it at https://fearless-otter-334.convex.site`;
           await sendNotificationEmail(
             inboxId,
             notifyTo,
-            `New product live on PixelShop: ${title}`,
-            `"${title}" is now live on PixelShop!${price ? `\nPrice: ${price}` : ""}\nURL: ${item.url}\n\nWatch it at https://fearless-otter-334.convex.site`,
+            `You're on air! ${item.itemNumber} — ${title}`,
+            html,
+            plainText,
           );
         }
       } catch {

@@ -72,3 +72,17 @@ body {
 @keyframes tv-static {
   to { background-position: 0 3px; }
 }
+
+/* Custom scrollbar — thin, themed, subtle */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #ffffff15; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #ffffff25; }
+* { scrollbar-width: thin; scrollbar-color: #ffffff15 transparent; }
+
+/* Smooth fade-in for list items and modal */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn { animation: fadeIn 0.2s ease-out; }
