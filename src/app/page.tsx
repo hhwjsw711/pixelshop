@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "../../convex/_generated/api";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 
 // ─── Types (matching Convex return) ───────────────────────
 
@@ -132,43 +132,33 @@ function ChannelView({ data }: { data: ChannelData }) {
   const [muted, setMuted] = useState(true);
   const [selectedItem, setSelectedItem] = useState<RotationItem | null>(null);
   const [showSubmit, setShowSubmit] = useState(false);
-  const [clipIndex, setClipIndex] = useState<number>(-1);
 
   const skewRef = useRef(0);
   const [now, setNow] = useState(0);
 
-  // Update clock (for UI display only — not for clip switching)
+  // Server-clock: drives both clip selection (Player) and list display (ProductList)
   useEffect(() => {
     if (data.serverNow) {
       skewRef.current = data.serverNow - Date.now();
     }
+    setNow(Date.now() + skewRef.current);
     const interval = setInterval(() => {
       setNow(Date.now() + skewRef.current);
     }, 250);
     return () => clearInterval(interval);
   }, [data.serverNow]);
 
-  // Initialize clipIndex on first load using server time
-  useEffect(() => {
-    if (clipIndex < 0 && data.schedule.length > 0 && data.serverNow) {
-      const pos = findPosition(data.schedule, Date.now() + skewRef.current);
-      setClipIndex(pos?.index ?? 0);
-    }
-  }, [data.schedule, data.serverNow, clipIndex, skewRef]);
+  // Time-driven clip selection — same logic as ProductList, so player
+  // and list are always in sync. No clipIndex, no onEnded-driven advance.
+  const currentEntry = useMemo(() => {
+    const pos = findPosition(data.schedule, now);
+    return pos?.entry ?? null;
+  }, [data.schedule, now]);
 
-  const currentEntry = clipIndex >= 0 && clipIndex < data.schedule.length
-    ? data.schedule[clipIndex]
-    : null;
-  const nextEntry = clipIndex >= 0 && clipIndex + 1 < data.schedule.length
-    ? data.schedule[clipIndex + 1]
-    : null;
-
-  const advanceClip = useCallback(() => {
-    setClipIndex((prev) => {
-      if (prev + 1 < data.schedule.length) return prev + 1;
-      return prev; // stay at end, hold timer will replay
-    });
-  }, [data.schedule.length]);
+  const nextEntry = useMemo(
+    () => findNext(data.schedule, now),
+    [data.schedule, now],
+  );
 
   const rotation = data.rotation ?? [];
   const pending = data.pending ?? [];
@@ -208,7 +198,6 @@ function ChannelView({ data }: { data: ChannelData }) {
             nextEntry={nextEntry}
             muted={muted}
             onToggleMute={() => setMuted((m) => !m)}
-            onAdvance={advanceClip}
             pendingCount={pending.length}
             hasCurrent={data.schedule.length > 0}
             offline={data.offline}
@@ -259,21 +248,17 @@ function ChannelView({ data }: { data: ChannelData }) {
 
 // ─── Player Component ────────────────────────────────────
 //
-// Single-video element with key-based switching + onEnded-driven advance.
-// Inspired by the unreel project's theater pattern:
+// Single-video element with key-based switching + time-driven clip selection.
 //   - Main video plays current clip, key changes on clip switch
 //   - Hidden preload video buffers next clip silently
-//   - onEnded drives clip advancement (not a polling clock)
-//   - Hold timer: if next clip not ready, replay current (loop beats freeze)
-
-const HOLD_MAX_MS = 4000;
+//   - onEnded loops current clip; time-based position handles transitions
+//   - Clip switching is driven by server-clock (now), not onEnded
 
 function Player({
   entry,
   nextEntry,
   muted,
   onToggleMute,
-  onAdvance,
   pendingCount,
   hasCurrent,
   offline,
@@ -284,7 +269,6 @@ function Player({
   nextEntry: ScheduleEntry | null;
   muted: boolean;
   onToggleMute: () => void;
-  onAdvance: () => void;
   pendingCount: number;
   hasCurrent: boolean;
   offline: boolean;
@@ -293,20 +277,10 @@ function Player({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const preloadRef = useRef<HTMLVideoElement>(null);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const entryKey = entry?.id ?? "standby";
   const videoUrl = entry?.clip?.videoUrl;
   const nextVideoUrl = nextEntry?.clip?.videoUrl;
-
-  const clearHold = useCallback(() => {
-    if (holdTimer.current) {
-      clearTimeout(holdTimer.current);
-      holdTimer.current = null;
-    }
-  }, []);
-
-  useEffect(() => clearHold, [clearHold]);
 
   // Play current clip when entry changes (key swap triggers remount)
   useEffect(() => {
@@ -340,24 +314,16 @@ function Player({
     preload.load();
   }, [nextVideoUrl]);
 
-  // onEnded: advance to next clip via onAdvance, or replay current if none
+  // onEnded: loop current clip. Time-based position (findPosition in
+  // ChannelView) handles switching to the next clip when now crosses
+  // the schedule boundary — no manual index increment needed.
   const onEnded = useCallback(() => {
-    clearHold();
     const video = videoRef.current;
-    if (!video) return;
-
-    if (nextEntry?.clip?.videoUrl) {
-      // Advance — parent increments clipIndex → key change → remount
-      onAdvance();
-    } else {
-      // No next clip — replay current after brief hold
-      holdTimer.current = setTimeout(() => {
-        holdTimer.current = null;
-        video.currentTime = 0;
-        video.play().catch(() => {});
-      }, HOLD_MAX_MS);
+    if (video) {
+      video.currentTime = 0;
+      video.play().catch(() => {});
     }
-  }, [nextEntry?.clip?.videoUrl, clearHold, onAdvance]);
+  }, []);
 
   const toggleSound = () => {
     onToggleMute();
