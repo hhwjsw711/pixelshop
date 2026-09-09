@@ -123,10 +123,18 @@ export const finalizeItem = mutation({
     // Add to channel rotation, remove from pending
     const channel = await ctx.db.get(item.channelId);
     if (channel) {
-      await ctx.db.patch(item.channelId, {
-        items: [...channel.items, args.itemId],
-        pending: channel.pending.filter((id) => id !== args.itemId),
-      });
+      // Deduplicate: only add if not already in items array
+      if (!channel.items.includes(args.itemId)) {
+        await ctx.db.patch(item.channelId, {
+          items: [...channel.items, args.itemId],
+          pending: channel.pending.filter((id) => id !== args.itemId),
+        });
+      } else {
+        // Already in rotation, just remove from pending
+        await ctx.db.patch(item.channelId, {
+          pending: channel.pending.filter((id) => id !== args.itemId),
+        });
+      }
     }
   },
 });
@@ -520,6 +528,14 @@ export const runPipeline = action({
         error: "FAL_KEY not set. Run: npx convex env set FAL_KEY <key>",
       });
       return;
+    }
+
+    // Idempotency: skip if item is already working or ready
+    const existingItem = await ctx.runQuery(api.channel.getItem, {
+      itemId: args.itemId,
+    });
+    if (existingItem?.status === "working" || existingItem?.status === "ready") {
+      return; // Already processed or in progress
     }
 
     fal.config({ credentials: process.env.FAL_KEY });

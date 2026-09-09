@@ -40,13 +40,16 @@ export const getChannel = query({
 
     if (!channel) return null;
 
-    // Fetch schedule entries
-    // Get newest 200 entries (reverse to chronological order)
+    // Fetch schedule entries — only future + recent past (last 60s)
+    // to avoid reading expired entries and reduce db.get count.
+    const now = Date.now();
     const scheduleDocs = (await ctx.db
       .query("schedule")
-      .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
-      .order("desc")
-      .take(200)).reverse();
+      .withIndex("by_channel_start", (q) =>
+        q.eq("channelId", channel._id).gte("startAt", now - 60_000)
+      )
+      .order("asc")
+      .take(50)).reverse();
 
     // Enrich schedule with item + clip data
     const schedule = await Promise.all(
@@ -274,10 +277,14 @@ export const sendChat = mutation({
 
     if (!channel) throw new Error("Channel not found");
 
+    const sender = args.sender.trim().slice(0, 30);
+    const text = args.text.trim().slice(0, 300);
+    if (!text) throw new Error("Empty message");
+
     await ctx.db.insert("chat", {
       channelId: channel._id,
-      sender: args.sender,
-      text: args.text,
+      sender,
+      text,
       role: "viewer" as const,
     });
   },
