@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '6764ac47-0229-4c90-baab-65b37068119e'
-  PropagateID: '6764ac47-0229-4c90-baab-65b37068119e'
-  ReservedCode1: '510b34ed-ddf3-4739-809d-532507a952aa'
-  ReservedCode2: '510b34ed-ddf3-4739-809d-532507a952aa'
+  ProduceID: '7feb0525-477a-4f75-aa83-4df4dc743e7e'
+  PropagateID: '7feb0525-477a-4f75-aa83-4df4dc743e7e'
+  ReservedCode1: '68a95df2-b033-4c09-a8bd-704ab9ffa78e'
+  ReservedCode2: '68a95df2-b033-4c09-a8bd-704ab9ffa78e'
 ---
 
 # Hackathon log
@@ -23,7 +23,7 @@ AIGC:
 - **Auth:** admin secret (clearMockData only)
 - **AI models:** fal H3 Max Turbo (text-to-video + image-to-video), OpenAI GPT-4o-mini (scriptwriting), Firecrawl (product scraping), AgentMail (email notifications)
 - **Started:** 2026-09-03T22:12:32Z
-- **Last updated:** 2026-09-09T08:40:00Z
+- **Last updated:** 2026-09-09T17:20:00Z
 
 ## Log
 
@@ -200,5 +200,41 @@ Second round of improvements, integrating all three hackathon sponsors:
   from 3 to 5 clips for better deduplication as the channel grows.
 
 TypeScript typecheck passes. Deployed to Convex static hosting.
+
+> AI生成
+
+### 2026-09-09 - End-to-end testing + schedule cleanup fix
+Full end-to-end validation and architecture fix:
+
+- **E2E test results:**
+  - PX-1002 (AirPods Pro, Amazon): Firecrawl scrape → OpenAI 3 scripts (6s/9s/7s
+    smartDuration) → fal I2V first clip + T2V remaining → clips scheduled →
+    rotation cron live → browser playback verified (subtitles, BUY NOW, ticker,
+    product list, chat all functional). ✅
+  - PX-1004 (Sony WH-1000XM5, Amazon): Firecrawl scrape (title + $298.00 +
+    image) → pipeline completed. ✅
+  - PX-1003 (Instant Pot, Amazon): Pipeline ran but product page returned
+    "Page Not Found" (item delisted) — pipeline handled gracefully without
+    crash. ⚠️
+  - PX-1001 (Apple Vision Pro): Firecrawl returned title + image but no price
+    (Apple does not expose structured pricing). ✅ (partial)
+
+- **Schedule table unbounded growth fix:** rotateSchedule cron ran every
+  minute, appending ~12 rotation entries per cycle but never deleting
+  expired ones. After hours of running, the schedule table exceeded
+  Convex's 4096-read limit on mutations. Fix: rotateSchedule now cleans
+  expired entries (where startAt + durationMs < now) at the beginning of
+  each execution, querying by_channel_start ascending and deleting in
+  batches of 50 until it hits a non-expired entry. Returns `cleaned` count
+  alongside `rotated`/`added`.
+
+- **clearMockData batch deletion:** Rewrote clearMockData to delete
+  schedule/clips/items in batches of 50 instead of collect()-then-loop,
+  avoiding the same read limit issue when tables are large.
+
+- **deleteItem mutation:** New mutation to delete a single item and its
+  associated clips + schedule entries, with admin key protection.
+
+Committed (e69e764). Backend + frontend deployed to Convex.
 
 > AI生成
