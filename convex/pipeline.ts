@@ -4,6 +4,12 @@ import { api } from "./_generated/api";
 import * as cheerio from "cheerio";
 import { fal } from "@fal-ai/client";
 
+// ─── Firecrawl scrape endpoint ───────────────────────────
+const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
+
+// ─── AgentMail API ───────────────────────────────────────
+const AGENTMAIL_BASE_URL = "https://api.agentmail.to/v0";
+
 // ─── Query: last schedule end time ─────────────────────────
 // Used by the pipeline to append new clips after existing schedule.
 
@@ -233,7 +239,104 @@ function isSafeUrl(raw: string): boolean {
   }
 }
 
-async function scrapeProduct(
+// ─── Helper: send notification email via AgentMail ──────
+
+async function sendNotificationEmail(
+  inboxId: string,
+  to: string,
+  subject: string,
+  text: string,
+): Promise<boolean> {
+  const key = process.env.AGENTMAIL_API_KEY;
+  if (!key || !inboxId) return false;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(
+      `${AGENTMAIL_BASE_URL}/inboxes/${inboxId}/messages/send`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({ to, subject, text }),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeout);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Helper: Firecrawl product scrape (primary) ──────────
+
+async function firecrawlScrape(
+  url: string,
+): Promise<{ title?: string; price?: string; image?: string; description?: string }> {
+  const key = process.env.FIRECRAWL_API_KEY;
+  if (!key) return {};
+  if (!isSafeUrl(url)) return {};
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch(FIRECRAWL_SCRAPE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["product"],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) return {};
+    const payload = (await response.json()) as {
+      success?: boolean;
+      data?: {
+        product?: {
+          title?: string;
+          brand?: string;
+          description?: string;
+          variants?: Array<{
+            price?: { formatted?: string };
+            images?: Array<{ url?: string }>;
+            availability?: { inStock?: boolean };
+          }>;
+        };
+      };
+    };
+
+    const product = payload.data?.product;
+    if (!product) return {};
+
+    const title = product.title?.trim().slice(0, 100) || undefined;
+    const description = product.description?.trim().slice(0, 500) || undefined;
+
+    // First variant's price and image
+    const variant = product.variants?.[0];
+    const price = variant?.price?.formatted?.slice(0, 20) || undefined;
+    const image = variant?.images?.[0]?.url || undefined;
+
+    return { title, price, image, description };
+  } catch {
+    return {};
+  }
+}
+
+// ─── Helper: cheerio scrape (fallback when Firecrawl unavailable) ──
+
+async function cheerioScrape(
   url: string,
 ): Promise<{ title?: string; price?: string; image?: string }> {
   // SSRF: reject non-http(s) and private network URLs
@@ -258,7 +361,6 @@ async function scrapeProduct(
       $('meta[property="og:title"]').attr("content")?.trim() ||
       $("title").text().trim() ||
       "";
-    // Clean up Amazon-style titles: "Amazon.com: Product Name : Category"
     let title: string | undefined = rawTitle.replace(/^Amazon\.com\s*:\s*/i, "").replace(/\s*:\s*\w+\s*$/, "").trim();
     if (title.length > 100) title = title.slice(0, 97) + "...";
     if (!title) title = undefined;
@@ -268,7 +370,6 @@ async function scrapeProduct(
       $('meta[name="twitter:image"]').attr("content")?.trim() ||
       undefined;
 
-    // Price: try structured data first, then visible price elements, filter out non-price text
     const rawPrice =
       $('[itemprop="price"]').attr("content")?.trim() ||
       $('meta[property="product:price:amount"]').attr("content")?.trim() ||
@@ -277,7 +378,6 @@ async function scrapeProduct(
     if (rawPrice && /^[\$£€¥¥\d.,\s]+/.test(rawPrice)) {
       price = rawPrice.slice(0, 20);
     } else {
-      // Try visible price elements, but filter out non-price text
       const priceText = $('[class*="price"], [id*="price"], [data-price]').first().text().trim();
       if (/^[\$£€¥¥]?[\d,]+\.?\d{0,2}/.test(priceText)) {
         price = priceText.slice(0, 20);
@@ -288,6 +388,19 @@ async function scrapeProduct(
   } catch {
     return {};
   }
+}
+
+// ─── Unified scrape: Firecrawl first, cheerio fallback ────
+
+async function scrapeProduct(
+  url: string,
+): Promise<{ title?: string; price?: string; image?: string; description?: string }> {
+  // Try Firecrawl product format first (structured, handles JS rendering)
+  const firecrawlResult = await firecrawlScrape(url);
+  if (firecrawlResult.title) return firecrawlResult;
+
+  // Fallback to cheerio
+  return cheerioScrape(url);
 }
 
 // ─── Query: recent clip dialogues (for anti-repetition context) ────
@@ -307,7 +420,7 @@ export const getRecentDialogues = query({
         q.eq("channelId", channel._id).eq("status", "ready"),
       )
       .order("desc")
-      .take(args.limit ?? 3);
+      .take(args.limit ?? 5);
 
     return ready.map((c) => c.dialogue);
   },
@@ -320,6 +433,7 @@ async function generateScript(
   price: string | undefined,
   url: string,
   history: string[],
+  description?: string,
 ): Promise<ScriptClip[]> {
   try {
     if (!process.env.OPENAI_API_KEY) throw new Error("No OpenAI key");
@@ -328,8 +442,9 @@ async function generateScript(
       history.length > 0
         ? `\n\nPrevious dialogue lines (do NOT repeat these exact lines):\n${history.map((h, i) => `${i + 1}. "${h}"`).join("\n")}`
         : "";
+    const descBlock = description ? `\nDescription: ${description}` : "";
 
-    const userPrompt = `Product: ${title}${price ? `\nPrice: ${price}` : ""}\nURL: ${url}${historyBlock}\n\nWrite 3 clips for this product presentation.`;
+    const userPrompt = `Product: ${title}${price ? `\nPrice: ${price}` : ""}${descBlock}\nURL: ${url}${historyBlock}\n\nWrite 3 clips for this product presentation.`;
 
     // Use fetch directly — OpenAI SDK is incompatible with Convex's action runtime
     const controller = new AbortController();
@@ -421,11 +536,13 @@ export const runPipeline = action({
       let image = item.image;
 
       // 2. Scrape URL if title is still placeholder
+      let productDescription: string | undefined;
       if (title === "Processing…") {
         const scraped = await scrapeProduct(item.url);
         if (scraped.title) title = scraped.title;
         if (scraped.price) price = scraped.price;
         if (scraped.image) image = scraped.image;
+        if (scraped.description) productDescription = scraped.description;
         if (title === "Processing…") title = "Untitled Product";
 
         await ctx.runMutation(api.pipeline.updateItemDetails, {
@@ -444,13 +561,13 @@ export const runPipeline = action({
       // 4. Fetch recent dialogue lines (anti-repetition context)
       let history: string[] = [];
       try {
-        history = await ctx.runQuery(api.pipeline.getRecentDialogues, { limit: 3 });
+        history = await ctx.runQuery(api.pipeline.getRecentDialogues, { limit: 5 });
       } catch {
         // Degrade gracefully — no history is better than failing the pipeline
       }
 
       // 5. Generate script (OpenAI → fallback clips on failure)
-      const clips = await generateScript(title, price, item.url, history);
+      const clips = await generateScript(title, price, item.url, history, productDescription);
 
       // 6. Calculate schedule start: 3s from now, or after existing schedule
       const lastEndAt = await ctx.runQuery(api.pipeline.getLastScheduleEnd, {});
@@ -464,16 +581,23 @@ export const runPipeline = action({
         const actualDurationMs = clip.durationSec * 1000;
 
         // H4: retry each clip up to 2 times with 500ms backoff
+        // First clip uses I2V with product image if available; rest use T2V
+        const endpoint = i === 0 && image ? TURBO_I2V : TURBO_T2V;
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const result = await fal.subscribe(TURBO_T2V, {
-              input: {
-                prompt: clip.videoPrompt,
-                duration: clip.durationSec,
-                resolution: "768P",
-                aspect_ratio: "16:9",
-                prompt_expansion_mode: "balanced",
-              },
+            const input: Record<string, unknown> = {
+              prompt: clip.videoPrompt,
+              duration: clip.durationSec,
+              resolution: "768P",
+              aspect_ratio: "16:9",
+              prompt_expansion_mode: "disabled",
+            };
+            if (i === 0 && image) {
+              input.image_url = image;
+            }
+
+            const result = await fal.subscribe(endpoint, {
+              input,
               pollInterval: 1000,
             });
 
@@ -528,6 +652,23 @@ export const runPipeline = action({
       await ctx.runMutation(api.pipeline.finalizeItem, {
         itemId: args.itemId,
       });
+
+      // 9. Send notification email via AgentMail (fire-and-forget)
+      //    Notifies the admin that a new product is live on the channel.
+      try {
+        const inboxId = process.env.AGENTMAIL_INBOX_ID;
+        const notifyTo = process.env.AGENTMAIL_NOTIFY_TO;
+        if (inboxId && notifyTo) {
+          await sendNotificationEmail(
+            inboxId,
+            notifyTo,
+            `New product live on PixelShop: ${title}`,
+            `"${title}" is now live on PixelShop!${price ? `\nPrice: ${price}` : ""}\nURL: ${item.url}\n\nWatch it at https://fearless-otter-334.convex.site`,
+          );
+        }
+      } catch {
+        // Email is best-effort — don't fail the pipeline
+      }
     } catch (e) {
       console.error("Pipeline failed:", e);
       try {
