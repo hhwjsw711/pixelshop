@@ -1,6 +1,7 @@
-import { query, mutation, internalMutation } from "./_generated/server";
+import { query, mutation, internalMutation, action } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
+import { api, internal } from "./_generated/api";
 
 // ─── Seed: ensure default channel exists ──────────────────
 
@@ -40,7 +41,7 @@ export const getChannel = query({
 
     if (!channel) return null;
 
-    // Fetch schedule entries — recent past (5 min) + all future
+    // Fetch schedule entries �?recent past (5 min) + all future
     // 5-min window keeps PAST PRODUCTS visible long enough for viewers
     // to see what just aired, while limiting DB reads.
     const now = Date.now();
@@ -244,7 +245,7 @@ export const submitProduct = mutation({
     const itemId = await ctx.db.insert("items", {
       channelId,
       url: validatedUrl,
-      title: args.title ?? "Processing…",
+      title: args.title ?? "Processing",
       price: args.price,
       image: args.image,
       itemNumber,
@@ -288,6 +289,106 @@ export const sendChat = mutation({
       text,
       role: "viewer" as const,
     });
+
+    // Schedule AI host reply (fire-and-forget, ~2-4s latency)
+    await ctx.scheduler.runAfter(0, api.channel.hostReply, {
+      channelId: channel._id,
+      viewerQuestion: text,
+      viewerName: sender,
+    });
+  },
+});
+
+// ─── AI Host chat reply (OpenAI text, not video) ───────
+
+export const hostReply = action({
+  args: {
+    channelId: v.id("channels"),
+    viewerQuestion: v.string(),
+    viewerName: v.string(),
+  },
+  handler: async (ctx, args) => {
+    // Get the current on-air item for context
+    const channel = await ctx.runQuery(api.channel.getChannel, {});
+    const onAirItem = channel?.schedule?.[0]?.item;
+    const productTitle = onAirItem?.title ?? "a great product";
+    const productPrice = onAirItem?.price ?? "";
+
+    // Build a short, enthusiastic host reply via OpenAI
+    const productContext = productPrice
+      ? `${productTitle} (${productPrice})`
+      : productTitle;
+
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      // Fallback: canned reply without AI
+      await ctx.runMutation(internal.channel.insertHostReply, {
+        channelId: args.channelId,
+        text: `Great question from ${args.viewerName}! ${productTitle} is an amazing deal �?don't miss out!`,
+      });
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `You are the AI host of PixelShop, a live TV shopping channel. A viewer asked a question. Reply in 1-2 short sentences (max 60 words). Be enthusiastic, warm, and on-brand like a TV shopping host. The current product on air is: ${productContext}. If the question is about the product, answer it. If it's general, acknowledge it warmly and tie it back to the product. Do NOT use emojis.`,
+            },
+            {
+              role: "user",
+              content: args.viewerQuestion,
+            },
+          ],
+          max_tokens: 100,
+          temperature: 0.8,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const data = await response.json();
+      const reply = data?.choices?.[0]?.message?.content?.trim() || `Great question! ${productTitle} is flying off the shelves �?grab yours now!`;
+
+      await ctx.runMutation(internal.channel.insertHostReply, {
+        channelId: args.channelId,
+        text: reply.slice(0, 300),
+      });
+    } catch {
+      // Fallback: canned reply
+      await ctx.runMutation(internal.channel.insertHostReply, {
+        channelId: args.channelId,
+        text: `Great question, ${args.viewerName}! ${productTitle} is a fantastic choice �?don't miss out!`,
+      });
+    }
+  },
+});
+
+// ─── Internal mutation: insert host reply into chat ─────
+
+export const insertHostReply = internalMutation({
+  args: {
+    channelId: v.id("channels"),
+    text: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.insert("chat", {
+      channelId: args.channelId,
+      sender: "Host",
+      text: args.text,
+      role: "host" as const,
+    });
   },
 });
 
@@ -296,9 +397,9 @@ export const sendChat = mutation({
 // Uses public sample MP4s (Big Buck Bunny / Sintel clips from Google storage).
 
 const MOCK_VIDEOS = [
-  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4", title: "Big Buck Bunny", price: "$19.99", dialogue: "Welcome to PixelShop! Today's first feature — Big Buck Bunny, the classic animated short. A story of revenge and justice in the forest.", image: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/320px-Big_buck_bunny_poster_big.jpg" },
-  { url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4", title: "Jellyfish Showcase", price: "$24.99", dialogue: "Our second feature — Jellyfish in crystal-clear 720p. A mesmerizing underwater showcase for the PixelShop player.", image: undefined as string | undefined },
-  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4", title: "Bunny Encore (360p)", price: "$9.99", dialogue: "And now, an encore presentation at 360p — a perfect demo of the PixelShop player's smooth resolution transitions.", image: undefined as string | undefined },
+  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4", title: "Big Buck Bunny", price: "$19.99", dialogue: "Welcome to PixelShop! Today's first feature �?Big Buck Bunny, the classic animated short. A story of revenge and justice in the forest.", image: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/320px-Big_buck_bunny_poster_big.jpg" },
+  { url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4", title: "Jellyfish Showcase", price: "$24.99", dialogue: "Our second feature �?Jellyfish in crystal-clear 720p. A mesmerizing underwater showcase for the PixelShop player.", image: undefined as string | undefined },
+  { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4", title: "Bunny Encore (360p)", price: "$9.99", dialogue: "And now, an encore presentation at 360p �?a perfect demo of the PixelShop player's smooth resolution transitions.", image: undefined as string | undefined },
 ];
 
 export const seedMockData = mutation({
@@ -553,7 +654,7 @@ export const rotateSchedule = internalMutation({
     // We query a batch of entries ordered ascending and delete those
     // whose (startAt + durationMs) < now. Stop at first non-expired.
     let cleaned = 0;
-    const playbackDelta = new Map<string, number>(); // itemId → seconds to add
+    const playbackDelta = new Map<string, number>(); // itemId �?seconds to add
     let cleanupDone = false;
     while (!cleanupDone) {
       const batch = await ctx.db

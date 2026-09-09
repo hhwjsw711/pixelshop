@@ -943,6 +943,13 @@ function ChatPanel({ offline, chat }: { offline: boolean; chat: ChatMessage[] })
     }
   }, [lastId]);
 
+  // Clear the "sending" indicator when a host reply arrives
+  useEffect(() => {
+    if (lastMsg && chat.some((m) => m.role === "host")) {
+      setLastMsg(null);
+    }
+  }, [lastId]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
