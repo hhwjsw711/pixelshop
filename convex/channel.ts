@@ -385,7 +385,6 @@ export const seedMockData = mutation({
 export const clearMockData = mutation({
   args: { adminKey: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    // --- Require admin key to prevent unauthorized data wipe ---
     if (args.adminKey !== process.env.ADMIN_SECRET) {
       throw new Error("Unauthorized: admin key required");
     }
@@ -395,35 +394,111 @@ export const clearMockData = mutation({
       .first();
     if (!channel) return { cleared: false };
 
-    // Delete all schedule entries
-    const schedules = await ctx.db
-      .query("schedule")
-      .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
-      .collect();
-    for (const s of schedules) await ctx.db.delete(s._id);
+    // Delete schedule entries in batches
+    let deletedSchedule = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await ctx.db
+        .query("schedule")
+        .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
+        .take(50);
+      if (batch.length === 0) { hasMore = false; break; }
+      for (const s of batch) await ctx.db.delete(s._id);
+      deletedSchedule += batch.length;
+    }
 
-    // Delete all clips
-    const clips = await ctx.db
-      .query("clips")
-      .withIndex("by_channel_status", (q) => q.eq("channelId", channel._id))
-      .collect();
-    for (const c of clips) await ctx.db.delete(c._id);
+    // Delete clips
+    let deletedClips = 0;
+    let moreClips = true;
+    while (moreClips) {
+      const batch = await ctx.db
+        .query("clips")
+        .withIndex("by_channel_status", (q) => q.eq("channelId", channel._id))
+        .take(50);
+      if (batch.length === 0) { moreClips = false; break; }
+      for (const c of batch) await ctx.db.delete(c._id);
+      deletedClips += batch.length;
+      if (batch.length < 50) moreClips = false;
+    }
 
-    // Delete all items (mock ones only — those with status "ready")
-    const items = await ctx.db
-      .query("items")
-      .withIndex("by_channel", (q) => q.eq("channelId", channel._id))
-      .collect();
-    for (const it of items) await ctx.db.delete(it._id);
+    // Delete items
+    let deletedItems = 0;
+    let moreItems = true;
+    while (moreItems) {
+      const batch = await ctx.db
+        .query("items")
+        .withIndex("by_channel", (q) => q.eq("channelId", channel._id))
+        .take(50);
+      if (batch.length === 0) { moreItems = false; break; }
+      for (const it of batch) await ctx.db.delete(it._id);
+      deletedItems += batch.length;
+      if (batch.length < 50) moreItems = false;
+    }
 
-    // Reset channel
     await ctx.db.patch(channel._id, {
       items: [],
       pending: [],
       status: "standby",
     });
 
-    return { cleared: true, deletedSchedule: schedules.length, deletedClips: clips.length, deletedItems: items.length };
+    return { cleared: true, deletedSchedule, deletedClips, deletedItems };
+  },
+});
+
+// ─── Delete a single item + its clips + schedule entries ──
+
+export const deleteItem = mutation({
+  args: {
+    itemId: v.id("items"),
+    adminKey: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    if (args.adminKey !== process.env.ADMIN_SECRET) {
+      throw new Error("Unauthorized: admin key required");
+    }
+    const item = await ctx.db.get(args.itemId);
+    if (!item) return { deleted: false, reason: "not found" };
+
+    // Delete schedule entries for this item (batch to avoid read limit)
+    let deletedSchedule = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await ctx.db
+        .query("schedule")
+        .withIndex("by_channel_start", (q) => q.eq("channelId", item.channelId))
+        .take(100);
+      if (batch.length === 0) { hasMore = false; break; }
+      for (const s of batch) {
+        if (s.itemId === args.itemId) await ctx.db.delete(s._id);
+      }
+      deletedSchedule += batch.filter((s) => s.itemId === args.itemId).length;
+      if (batch.length < 100) hasMore = false;
+    }
+
+    // Delete clips for this item
+    const clips = await ctx.db
+      .query("clips")
+      .withIndex("by_item", (q) => q.eq("itemId", args.itemId))
+      .collect();
+    for (const c of clips) await ctx.db.delete(c._id);
+
+    // Remove from channel items + pending arrays
+    const channel = await ctx.db.get(item.channelId);
+    if (channel) {
+      await ctx.db.patch(channel._id, {
+        items: channel.items.filter((id) => id !== args.itemId),
+        pending: channel.pending.filter((id) => id !== args.itemId),
+      });
+    }
+
+    // Delete the item itself
+    await ctx.db.delete(args.itemId);
+
+    return {
+      deleted: true,
+      deletedSchedule,
+      deletedClips: clips.length,
+    };
   },
 });
 
@@ -461,16 +536,44 @@ export const rotateSchedule = internalMutation({
       .first();
     if (!channel) return { rotated: false, reason: "no channel" };
 
+    const now = Date.now();
+
+    // ── Clean up expired schedule entries (endAt < now) ──
+    // Prevents the schedule table from growing unbounded.
+    // Uses the by_channel_start index: old entries have small startAt.
+    // We query a batch of entries ordered ascending and delete those
+    // whose (startAt + durationMs) < now. Stop at first non-expired.
+    let cleaned = 0;
+    let cleanupDone = false;
+    while (!cleanupDone) {
+      const batch = await ctx.db
+        .query("schedule")
+        .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
+        .order("asc")
+        .take(50);
+      if (batch.length === 0) { cleanupDone = true; break; }
+      let allExpired = true;
+      for (const entry of batch) {
+        if (entry.startAt + entry.durationMs < now) {
+          await ctx.db.delete(entry._id);
+          cleaned++;
+        } else {
+          allExpired = false;
+          break;
+        }
+      }
+      if (!allExpired || batch.length < 50) { cleanupDone = true; }
+    }
+
     // Get the last schedule entry
     const lastEntry = await ctx.db
       .query("schedule")
       .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
       .order("desc")
       .first();
-    if (!lastEntry) return { rotated: false, reason: "no schedule" };
+    if (!lastEntry) return { rotated: false, reason: "no schedule", cleaned };
 
     const lastEndAt = lastEntry.startAt + lastEntry.durationMs;
-    const now = Date.now();
 
     // Only rotate if schedule ends within 60 seconds (or already ended)
     if (lastEndAt > now + 60_000) return { rotated: false, reason: "not ending soon" };
@@ -522,7 +625,7 @@ export const rotateSchedule = internalMutation({
       await ctx.db.patch(channel._id, { status: "live" });
     }
 
-    return { rotated: true, added };
+    return { rotated: true, added, cleaned };
   },
 });
 
