@@ -260,6 +260,9 @@ export const submitProduct = mutation({
       status: channel.status === "offline" ? "offline" : "live",
     });
 
+    // Trigger the generation pipeline (Firecrawl → OpenAI → fal)
+    await ctx.scheduler.runAfter(0, api.pipeline.runPipeline, { itemId });
+
     return { itemId, itemNumber };
   },
 });
@@ -544,13 +547,27 @@ export const clearMockData = mutation({
       if (batch.length < 50) moreItems = false;
     }
 
+    // Delete chat messages
+    let deletedChat = 0;
+    let moreChat = true;
+    while (moreChat) {
+      const batch = await ctx.db
+        .query("chat")
+        .withIndex("by_channel_created", (q) => q.eq("channelId", channel._id))
+        .take(50);
+      if (batch.length === 0) { moreChat = false; break; }
+      for (const c of batch) await ctx.db.delete(c._id);
+      deletedChat += batch.length;
+      if (batch.length < 50) moreChat = false;
+    }
+
     await ctx.db.patch(channel._id, {
       items: [],
       pending: [],
       status: "standby",
     });
 
-    return { cleared: true, deletedSchedule, deletedClips, deletedItems };
+    return { cleared: true, deletedSchedule, deletedClips, deletedItems, deletedChat };
   },
 });
 
@@ -695,20 +712,28 @@ export const rotateSchedule = internalMutation({
       .withIndex("by_channel_start", (q) => q.eq("channelId", channel._id))
       .order("desc")
       .first();
-    if (!lastEntry) return { rotated: false, reason: "no schedule", cleaned };
-
-    const lastEndAt = lastEntry.startAt + lastEntry.durationMs;
-
-    // Only rotate if schedule ends within 60 seconds (or already ended)
-    if (lastEndAt > now + 60_000) return { rotated: false, reason: "not ending soon" };
-
     // Get rotation items
     const rotationIds = channel.items;
-    if (rotationIds.length === 0) return { rotated: false, reason: "no rotation items" };
+    if (rotationIds.length === 0) return { rotated: false, reason: "no rotation items", cleaned };
 
-    // Round-robin: find the next item after the last played one
-    const lastIndex = rotationIds.findIndex((id) => id === lastEntry.itemId);
-    let nextIndex = lastIndex >= 0 ? (lastIndex + 1) % rotationIds.length : 0;
+    // If no schedule exists, seed initial schedule from rotation items
+    let lastEndAt: number;
+    let nextIndex: number;
+
+    if (!lastEntry) {
+      // No schedule at all — start fresh from now
+      lastEndAt = now;
+      nextIndex = 0;
+    } else {
+      lastEndAt = lastEntry.startAt + lastEntry.durationMs;
+
+      // Only rotate if schedule ends within 60 seconds (or already ended)
+      if (lastEndAt > now + 60_000) return { rotated: false, reason: "not ending soon", cleaned };
+
+      // Round-robin: find the next item after the last played one
+      const lastIndex = rotationIds.findIndex((id) => id === lastEntry.itemId);
+      nextIndex = lastIndex >= 0 ? (lastIndex + 1) % rotationIds.length : 0;
+    }
 
     // Add rotation cycles until we have at least 2 minutes of future content
     let scheduleStart = Math.max(lastEndAt, now + 2000);

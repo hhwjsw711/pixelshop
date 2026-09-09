@@ -607,13 +607,13 @@ export const runPipeline = action({
 
       // 2. Scrape URL if title is still placeholder
       let productDescription: string | undefined;
-      if (title === "Processing…") {
+      if (title === "Processing" || title === "Processing…") {
         const scraped = await scrapeProduct(item.url);
         if (scraped.title) title = scraped.title;
         if (scraped.price) price = scraped.price;
         if (scraped.image) image = scraped.image;
         if (scraped.description) productDescription = scraped.description;
-        if (title === "Processing…") title = "Untitled Product";
+        if (title === "Processing" || title === "Processing…") title = "Untitled Product";
 
         await ctx.runMutation(api.pipeline.updateItemDetails, {
           itemId: args.itemId,
