@@ -152,41 +152,66 @@ export const failItem = mutation({
 // ─── Pipeline Action ───────────────────────────────────────
 // Orchestrates: scrape → OpenAI script → fal H3 video gen → Convex updates
 
-const CLIP_DURATION = 10; // seconds per clip
-const CLIP_DURATION_MS = 10000;
 const TURBO_T2V = "minimax/h3-max-turbo/text-to-video";
+const TURBO_I2V = "minimax/h3-max-turbo/image-to-video";
+const MIN_DURATION = 5;
+const MAX_DURATION = 10;
 
 interface ScriptClip {
   videoPrompt: string;
   dialogue: string;
+  durationSec: number; // 5-10 seconds, calculated from word count
 }
 
-const SYSTEM_PROMPT = `You are the scriptwriter for PixelShop, an AI shopping channel where an AI host presents products in generated video clips. Each clip is 10 seconds. You will receive product information and write 3 consecutive clips that form a complete product presentation.
+// ─── Smart duration: match video length to dialogue word count ─────────
+// Formula: ceil(words / 2.8), clamped to [5, 10]
+// ~2.8 words/second is natural English speaking pace for AI video hosts
+function smartDuration(dialogue: string): number {
+  const words = dialogue.trim().split(/\s+/).length;
+  return Math.max(MIN_DURATION, Math.min(MAX_DURATION, Math.ceil(words / 2.8)));
+}
+
+// ─── Channel persona ────────────────────────────────────
+// Defines the host character and studio setting for visual consistency.
+// Used in every videoPrompt to give the AI video model a consistent anchor.
+const HOST_PERSONA = "Max Flex, an original fictional American shopping television host, 35 years old, neatly styled dark hair, clean shaven, energetic friendly face, fitted charcoal blazer, white v-neck shirt, blue sneaker trainers. Enthusiastic professional salesman voice with a warm American accent. He is charismatic, high-energy and genuinely excited about every product.";
+const STUDIO_SETTING = "Photorealistic modern 2020s AI shopping television studio, dark backdrop with neon pink and cyan accent lights, glossy black floor, floating product pedestal with spotlight. One presenter only. Wide horizontal 16:9 composition. No generated text, captions, logos, watermarks or prices on screen.";
+
+const SYSTEM_PROMPT = `You are the scriptwriter for PixelShop, an AI shopping channel where Max Flex presents products in generated video clips. You will receive product information and write 3 consecutive clips that form a complete product presentation.
+
+The host is: ${HOST_PERSONA}
+The studio is: ${STUDIO_SETTING}
 
 Each clip has:
-- videoPrompt: A visual description for the AI video model. Describe what the camera sees: the setting, the product, the host's actions. Include the spoken line in double quotes using this format: The host says, "line here" and continues without another word. Keep the full prompt under 420 characters. End with: Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.
-- dialogue: The exact spoken line (shown as subtitle), extracted from the videoPrompt without quotes.
+- videoPrompt: A visual description for the AI video model. Start every prompt with the studio setting and host description, then describe what happens. Include the spoken line in double quotes using this format: The host says, "line here" and continues without another word. Keep the full prompt under 450 characters. End with: Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.
+- dialogue: The exact spoken line (shown as subtitle), extracted from the videoPrompt without quotes. Must be 8-25 words for natural pacing.
+- durationSec: The video duration in seconds, calculated as ceil(word_count / 2.8), clamped to [5, 10]. Include this for each clip.
 
 The 3 clips should follow this arc:
-1. Introduction: Host introduces the product with excitement
-2. Feature highlight: Host demonstrates or describes key features
-3. Call to action: Host urges viewers to buy now
+1. Introduction: Max introduces the product with excitement (10-25 words)
+2. Feature highlight: Max demonstrates or describes key features (10-25 words)
+3. Call to action: Max urges viewers to buy now (8-20 words)
+
+NEVER repeat dialogue lines from previous clips. Each clip must have unique wording.
 
 Return ONLY a JSON object with a "clips" array, no markdown fences:
-{"clips": [{"videoPrompt": "...", "dialogue": "..."}]}`;
+{"clips": [{"videoPrompt": "...", "dialogue": "...", "durationSec": 5}]}`;
 
 const FALLBACK_CLIPS: ScriptClip[] = [
   {
-    videoPrompt: `A bright modern TV shopping studio with colorful lights. A charismatic host stands next to a product on a pedestal and gestures toward it with excitement. The host says, "Welcome to PixelShop! Today we have something amazing for you." and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
+    videoPrompt: `${STUDIO_SETTING} ${HOST_PERSONA} Max stands next to a product on a pedestal and gestures toward it with excitement. The host says, "Welcome to PixelShop! Today we have something amazing for you." and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
     dialogue: "Welcome to PixelShop! Today we have something amazing for you.",
+    durationSec: 5,
   },
   {
-    videoPrompt: `Close-up of a product on a pedestal in a bright TV shopping studio. A host gestures toward the product features with enthusiasm. The host says, "Look at this incredible design and quality." and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
+    videoPrompt: `${STUDIO_SETTING} ${HOST_PERSONA} Close-up of a product on a pedestal. Max gestures toward the product features with enthusiasm. The host says, "Look at this incredible design and quality." and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
     dialogue: "Look at this incredible design and quality.",
+    durationSec: 5,
   },
   {
-    videoPrompt: `A host in a TV shopping studio points toward a glowing BUY NOW button overlay. The host says, "Don't wait — buy now before it's gone!" and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
+    videoPrompt: `${STUDIO_SETTING} ${HOST_PERSONA} Max points toward a glowing BUY NOW button overlay. The host says, "Don't wait — buy now before it's gone!" and continues without another word. Sound: ambient studio audio; the only spoken words are the exact quoted line, delivered clearly in English; all other voices are wordless.`,
     dialogue: "Don't wait — buy now before it's gone!",
+    durationSec: 5,
   },
 ];
 
@@ -265,19 +290,51 @@ async function scrapeProduct(
   }
 }
 
+// ─── Query: recent clip dialogues (for anti-repetition context) ────
+
+export const getRecentDialogues = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const channel = await ctx.db
+      .query("channels")
+      .withIndex("by_slug", (q) => q.eq("slug", "main"))
+      .first();
+    if (!channel) return [];
+
+    const ready = await ctx.db
+      .query("clips")
+      .withIndex("by_channel_status", (q) =>
+        q.eq("channelId", channel._id).eq("status", "ready"),
+      )
+      .order("desc")
+      .take(args.limit ?? 3);
+
+    return ready.map((c) => c.dialogue);
+  },
+});
+
 // ─── Helper: generate script via OpenAI ─────────────────────
 
 async function generateScript(
   title: string,
   price: string | undefined,
   url: string,
+  history: string[],
 ): Promise<ScriptClip[]> {
   try {
     if (!process.env.OPENAI_API_KEY) throw new Error("No OpenAI key");
 
-    const userPrompt = `Product: ${title}${price ? `\nPrice: ${price}` : ""}\nURL: ${url}\n\nWrite 3 clips for this product presentation.`;
+    const historyBlock =
+      history.length > 0
+        ? `\n\nPrevious dialogue lines (do NOT repeat these exact lines):\n${history.map((h, i) => `${i + 1}. "${h}"`).join("\n")}`
+        : "";
+
+    const userPrompt = `Product: ${title}${price ? `\nPrice: ${price}` : ""}\nURL: ${url}${historyBlock}\n\nWrite 3 clips for this product presentation.`;
 
     // Use fetch directly — OpenAI SDK is incompatible with Convex's action runtime
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -291,10 +348,12 @@ async function generateScript(
           { role: "user", content: userPrompt },
         ],
         response_format: { type: "json_object" },
-        max_tokens: 1200,
-        temperature: 0.8,
+        max_tokens: 1500,
+        temperature: 0.85,
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
     if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
 
@@ -310,16 +369,24 @@ async function generateScript(
       throw new Error("Invalid script format");
 
     return clips
-      .map((c: { videoPrompt?: string; dialogue?: string }) => ({
-        videoPrompt:
-          typeof c.videoPrompt === "string"
-            ? c.videoPrompt.slice(0, 500)
-            : FALLBACK_CLIPS[0].videoPrompt,
-        dialogue:
-          typeof c.dialogue === "string"
-            ? c.dialogue.slice(0, 200)
-            : FALLBACK_CLIPS[0].dialogue,
-      }))
+      .map(
+        (c: { videoPrompt?: string; dialogue?: string; durationSec?: number }) => ({
+          videoPrompt:
+            typeof c.videoPrompt === "string"
+              ? c.videoPrompt.slice(0, 500)
+              : FALLBACK_CLIPS[0].videoPrompt,
+          dialogue:
+            typeof c.dialogue === "string"
+              ? c.dialogue.slice(0, 200)
+              : FALLBACK_CLIPS[0].dialogue,
+          durationSec:
+            typeof c.durationSec === "number" &&
+            c.durationSec >= MIN_DURATION &&
+            c.durationSec <= MAX_DURATION
+              ? Math.round(c.durationSec)
+              : smartDuration(c.dialogue ?? ""),
+        }),
+      )
       .slice(0, 3);
   } catch {
     return FALLBACK_CLIPS;
@@ -374,18 +441,27 @@ export const runPipeline = action({
         itemId: args.itemId,
       });
 
-      // 4. Generate script (OpenAI → fallback clips on failure)
-      const clips = await generateScript(title, price, item.url);
+      // 4. Fetch recent dialogue lines (anti-repetition context)
+      let history: string[] = [];
+      try {
+        history = await ctx.runQuery(api.pipeline.getRecentDialogues, { limit: 3 });
+      } catch {
+        // Degrade gracefully — no history is better than failing the pipeline
+      }
 
-      // 5. Calculate schedule start: 3s from now, or after existing schedule
+      // 5. Generate script (OpenAI → fallback clips on failure)
+      const clips = await generateScript(title, price, item.url, history);
+
+      // 6. Calculate schedule start: 3s from now, or after existing schedule
       const lastEndAt = await ctx.runQuery(api.pipeline.getLastScheduleEnd, {});
       let scheduleStart = Math.max(Date.now() + 3000, lastEndAt + 1000);
 
-      // 6. Generate videos with fal H3, add each to schedule as ready
+      // 7. Generate videos with fal H3, add each to schedule as ready
       let successCount = 0;
       for (let i = 0; i < clips.length; i++) {
         const clip = clips[i];
         let clipSuccess = false;
+        const actualDurationMs = clip.durationSec * 1000;
 
         // H4: retry each clip up to 2 times with 500ms backoff
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -393,7 +469,7 @@ export const runPipeline = action({
             const result = await fal.subscribe(TURBO_T2V, {
               input: {
                 prompt: clip.videoPrompt,
-                duration: CLIP_DURATION,
+                duration: clip.durationSec,
                 resolution: "768P",
                 aspect_ratio: "16:9",
                 prompt_expansion_mode: "balanced",
@@ -418,11 +494,12 @@ export const runPipeline = action({
               videoUrl: videoUrl,
               dialogue: clip.dialogue,
               clipIndex: i,
-              durationMs: CLIP_DURATION_MS,
+              durationMs: actualDurationMs,
               startAt: hintStart,
             });
 
-            scheduleStart = hintStart + CLIP_DURATION_MS;
+            // Use actual duration (not fixed constant) to avoid schedule gaps
+            scheduleStart = hintStart + actualDurationMs;
             successCount++;
             clipSuccess = true;
             break; // success, no more retries
@@ -439,7 +516,7 @@ export const runPipeline = action({
         }
       }
 
-      // 7. Finalize or fail
+      // 8. Finalize or fail
       if (successCount === 0) {
         await ctx.runMutation(api.pipeline.failItem, {
           itemId: args.itemId,
